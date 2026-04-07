@@ -1,0 +1,31 @@
+[package]
+name = "ctrlb-decompose"
+version = "0.1.0"
+edition = "2024"
+description = "Compress raw log lines into structural patterns with statistics, anomalies, and correlations"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sketches-ddsketch = "0.3"
+hyperloglogplus = "0.4"
+colored = "2"
+anyhow = "1"
+lru = "0.14"
+regex = "1"
+once_cell = "1"
+fastrand = "2"
+
+# TODO (Phase 2): Add Drain3 crate as path dependency
+# drain3 = { path = "../<drain3-crate>" }
+
+[dev-dependencies]
+insta = { version = "1", features = ["json"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "pipeline"
+harness = false
