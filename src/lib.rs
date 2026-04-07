@@ -104,7 +104,7 @@ impl Args {
 
 #[cfg(feature = "cli")]
 pub fn run(args: Args) -> Result<()> {
-    let reader: Box<dyn BufRead> = match args.file.as_deref() {
+    let mut reader: Box<dyn BufRead> = match args.file.as_deref() {
         None | Some("-") => Box::new(BufReader::new(io::stdin())),
         Some(path) => Box::new(BufReader::new(File::open(path)?)),
     };
@@ -115,8 +115,14 @@ pub fn run(args: Args) -> Result<()> {
     let mut store = PatternStore::new(opts.context);
     let mut line_number: u64 = 0;
 
-    for line_result in reader.lines() {
-        let line = line_result?;
+    let mut raw_buf = Vec::new();
+    loop {
+        raw_buf.clear();
+        let bytes_read = reader.read_until(b'\n', &mut raw_buf)?;
+        if bytes_read == 0 {
+            break;
+        }
+        let line = String::from_utf8_lossy(&raw_buf).trim_end_matches('\n').trim_end_matches('\r').to_string();
         if line.is_empty() {
             continue;
         }
