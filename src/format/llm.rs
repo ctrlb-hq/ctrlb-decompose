@@ -246,7 +246,15 @@ const MAX_TOKEN_LEN: usize = 50;
 /// Truncate a single string if longer than MAX_TOKEN_LEN.
 fn truncate_token(s: &str) -> String {
     if s.len() > MAX_TOKEN_LEN {
-        format!("{}...{}", &s[..20], &s[s.len() - 10..])
+        let mut head = 20;
+        while !s.is_char_boundary(head) {
+            head -= 1;
+        }
+        let mut tail = s.len() - 10;
+        while !s.is_char_boundary(tail) {
+            tail += 1;
+        }
+        format!("{}...{}", &s[..head], &s[tail..])
     } else {
         s.to_string()
     }

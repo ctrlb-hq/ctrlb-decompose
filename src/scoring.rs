@@ -101,7 +101,11 @@ const KEYWORD_PREFIX_LEN: usize = 100;
 /// deep in the template body. Returns the max weight found, or 1.0 if
 /// no keywords match.
 fn match_keyword_weight(template: &str, weights: &HashMap<&str, f64>) -> f64 {
-    let prefix = &template[..template.len().min(KEYWORD_PREFIX_LEN)];
+    let mut end = template.len().min(KEYWORD_PREFIX_LEN);
+    while !template.is_char_boundary(end) {
+        end -= 1;
+    }
+    let prefix = &template[..end];
     let tokens = tokenize_template(prefix);
     let mut max_weight = 1.0_f64;
     let mut found = false;
