@@ -52,4 +52,6 @@ pub struct FormatOptions {
     pub no_color: bool,
     pub no_banner: bool,
     pub output_mode: OutputMode,
+    pub source_label: Option<String>,
+    pub sim_threshold: f64,
 }

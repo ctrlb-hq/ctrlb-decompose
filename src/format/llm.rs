@@ -25,9 +25,13 @@ pub fn format(
         ),
         _ => String::new(),
     };
+    let label_part = match &opts.source_label {
+        Some(label) => format!(" ({})", label),
+        None => String::new(),
+    };
     out.push_str(&format!(
-        "## Log Analysis: {} lines -> {} patterns{}\n\n",
-        total_lines, pattern_count, time_range
+        "## Log Analysis{}: {} lines -> {} patterns{}\n\n",
+        label_part, total_lines, pattern_count, time_range
     ));
 
     // Partition patterns into critical vs high-volume.
@@ -219,25 +223,22 @@ fn build_labeled_template_for(pattern: &PatternStats) -> String {
 fn build_labeled_template(template: &str, labels: &[String]) -> String {
     let mut result = String::new();
     let mut label_idx = 0;
+    let wildcard = "<*>";
+    let mut remaining = template;
 
-    for token in template.split_whitespace() {
-        if !result.is_empty() {
-            result.push(' ');
-        }
-        if token == "<*>" {
-            if label_idx < labels.len() {
-                result.push('{');
-                result.push_str(&labels[label_idx]);
-                result.push('}');
-                label_idx += 1;
-            } else {
-                result.push_str("<*>");
-            }
+    while let Some(pos) = remaining.find(wildcard) {
+        result.push_str(&remaining[..pos]);
+        if label_idx < labels.len() {
+            result.push('{');
+            result.push_str(&labels[label_idx]);
+            result.push('}');
+            label_idx += 1;
         } else {
-            result.push_str(token);
+            result.push_str(wildcard);
         }
+        remaining = &remaining[pos + wildcard.len()..];
     }
-
+    result.push_str(remaining);
     result
 }
 

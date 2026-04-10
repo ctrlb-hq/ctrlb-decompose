@@ -206,6 +206,38 @@ Options:
 
 ---
 
+## Use Cases
+
+ctrlb-decompose is useful for:
+
+- **Incident triage** — Surface error patterns, p99 spikes, and host concentration in thousands of log lines. See [docs/use-cases.md](docs/use-cases.md#incident-triage).
+- **Postmortem summary** — Generate LLM-friendly summaries for automated timeline reconstruction. See [docs/use-cases.md](docs/use-cases.md#postmortem-summary).
+- **CI/CD log triage** — Find failure patterns buried in verbose build output. See [docs/use-cases.md](docs/use-cases.md#cicd-log-triage).
+- **Monitoring** — Use `--json` for programmatic alerting thresholds. See [docs/use-cases.md](docs/use-cases.md#monitoring--alerting).
+- **Log comparison** — Diff patterns before and after a deployment. See [docs/use-cases.md](docs/use-cases.md#log-comparison).
+
+## Integration
+
+ctrlb-decompose pipes into any workflow:
+
+```bash
+# Kubernetes pods
+kubectl logs -l app=api --since=1h | ctrlb-decompose --llm --source-label "api"
+
+# systemd services
+journalctl -u nginx --since "1 hour ago" --no-pager | ctrlb-decompose --llm
+
+# Docker Compose
+docker compose logs api db --since 30m | ctrlb-decompose --llm
+
+# CI failure summary
+cargo test 2>&1 | ctrlb-decompose --llm --top 5 --context 2
+```
+
+See [docs/integration.md](docs/integration.md) for detailed recipes including Claude Code setup, GitHub Actions, SSH remote analysis, and JSON programmatic use.
+
+---
+
 ## License
 
 [MIT](LICENSE)
