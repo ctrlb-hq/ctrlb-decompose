@@ -73,6 +73,9 @@ impl NumericStats {
     }
 
     pub fn update(&mut self, value: f64) {
+        if !value.is_finite() {
+            return;
+        }
         self.count += 1;
         self.sum += value;
         if value < self.min {
@@ -492,27 +495,15 @@ mod tests {
 
     #[test]
     fn test_numeric_stats_nan_inf() {
-        // Documenting current behavior:
-        // - NaN is accepted (DDSketch silently handles it), count is incremented
-        // - Inf and -Inf cause DDSketch to panic internally
+        // Non-finite values (NaN, Inf, -Inf) are silently skipped
         let mut ns = NumericStats::new();
         ns.update(1.0);
         ns.update(f64::NAN);
-        assert_eq!(ns.count, 2, "NaN should be counted");
-
-        let result = std::panic::catch_unwind(|| {
-            let mut ns = NumericStats::new();
-            ns.update(f64::INFINITY);
-            ns
-        });
-        assert!(result.is_err(), "DDSketch should panic on Inf");
-
-        let result = std::panic::catch_unwind(|| {
-            let mut ns = NumericStats::new();
-            ns.update(f64::NEG_INFINITY);
-            ns
-        });
-        assert!(result.is_err(), "DDSketch should panic on -Inf");
+        ns.update(f64::INFINITY);
+        ns.update(f64::NEG_INFINITY);
+        assert_eq!(ns.count, 1, "Only finite values should be counted");
+        assert_eq!(ns.min, 1.0);
+        assert_eq!(ns.max, 1.0);
     }
 
     #[test]

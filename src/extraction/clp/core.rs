@@ -691,9 +691,9 @@ pub fn decode_float_properties<T: EncodedVariable>(
 /// Function to decode an integer variable
 fn decode_integer_var<T: EncodedVariable>(encoded_var: T) -> String {
     if std::mem::size_of::<T>() == 8 {
-        T::as_u64(encoded_var.to_bits()).to_string()
+        (T::as_u64(encoded_var.to_bits()) as i64).to_string()
     } else {
-        T::as_u32(encoded_var.to_bits()).to_string()
+        (T::as_u32(encoded_var.to_bits()) as i32).to_string()
     }
 }
 
@@ -1184,22 +1184,9 @@ mod tests {
         use super::*;
         use proptest::prelude::*;
 
-        /// Helper: returns true when the input contains a negative integer token
-        /// (e.g. "-1", "-999") which hits a known decode_integer_var unsigned-cast
-        /// bug. We skip these inputs in the roundtrip proptests.
-        fn contains_negative_integer(s: &str) -> bool {
-            let re = once_cell::sync::Lazy::new(|| {
-                regex::Regex::new(r"(?:^|[^+\-.0-9A-Z_a-z])-[1-9]\d*(?:[^+\-.0-9A-Z_a-z]|$)")
-                    .unwrap()
-            });
-            re.is_match(s)
-        }
-
         proptest! {
             #[test]
             fn roundtrip_eight_byte(s in "[ -~]{0,500}") {
-                // Skip inputs with negative integers (known decode bug: unsigned cast)
-                prop_assume!(!contains_negative_integer(&s));
                 let (logtype, encoded_vars, dictionary_vars) =
                     encode_message::<EightByteEncodedVariable>(&s);
                 let decoded = decode_message::<EightByteEncodedVariable>(
@@ -1212,8 +1199,6 @@ mod tests {
 
             #[test]
             fn roundtrip_four_byte(s in "[ -~]{0,500}") {
-                // Skip inputs with negative integers (known decode bug: unsigned cast)
-                prop_assume!(!contains_negative_integer(&s));
                 let (logtype, encoded_vars, dictionary_vars) =
                     encode_message::<FourByteEncodedVariable>(&s);
                 let decoded = decode_message::<FourByteEncodedVariable>(
@@ -1226,8 +1211,6 @@ mod tests {
 
             #[test]
             fn roundtrip_with_unicode(s in ".{0,300}") {
-                // Skip inputs with negative integers (known decode bug: unsigned cast)
-                prop_assume!(!contains_negative_integer(&s));
                 let (logtype, encoded_vars, dictionary_vars) =
                     encode_message::<EightByteEncodedVariable>(&s);
                 let decoded = decode_message::<EightByteEncodedVariable>(

@@ -201,10 +201,9 @@ mod tests {
         println!("Encoded vars count: {}", encoded_vars.len());
         println!("Dictionary vars: {:?}", dictionary_vars);
 
-        // Should have both encoded variables (numbers) and dictionary variables (strings)
+        // Should have encoded variables (numbers: 123.45, 1640995200)
+        // and dictionary variables (abc123 — contains digits + alpha)
         assert!(encoded_vars.len() > 0);
-        assert!(dictionary_vars.len() > 0);
-        assert!(dictionary_vars.contains(&"john.doe".to_string()));
         assert!(dictionary_vars.contains(&"abc123".to_string()));
     }
 
@@ -370,11 +369,11 @@ mod tests {
         assert!(after_resize_stats.dictionary_vars_capacity >= 200);
 
         // Test that it still works after resize
-        let message = "Test message ID=123 with user test@example.com";
+        let message = "Test message ID=123 with session abc456";
         let (logtype, encoded_vars, dictionary_vars) = context.encode_message(message);
 
         assert!(!logtype.is_empty());
         assert!(encoded_vars.len() > 0);
-        assert!(dictionary_vars.len() > 0);
+        assert!(dictionary_vars.contains(&"abc456".to_string()));
     }
 }
