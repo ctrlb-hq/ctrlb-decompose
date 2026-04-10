@@ -77,6 +77,10 @@ pub struct Args {
     /// Suppress progress output on stderr
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Label for the log source (shown in output header)
+    #[arg(long)]
+    pub source_label: Option<String>,
 }
 
 #[cfg(feature = "cli")]
@@ -96,8 +100,9 @@ impl Args {
             top: self.top,
             context: if self.llm && self.context == 0 { 2 } else { self.context },
             no_color: self.no_color,
-            no_banner: self.no_banner,
+            no_banner: self.no_banner || self.llm,
             output_mode: self.output_mode(),
+            source_label: self.source_label.clone(),
         }
     }
 }
@@ -162,7 +167,7 @@ pub fn run(args: Args) -> Result<()> {
     let output = format_output(&store, &opts, &scores);
     print!("{}", output);
 
-    if !args.quiet {
+    if !args.quiet && !opts.no_banner {
         eprintln!(
             "\nPowered by CtrlB \u{00b7} Search 5TB of logs in 614ms \u{2192} ctrlb.ai"
         );

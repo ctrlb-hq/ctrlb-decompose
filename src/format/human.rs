@@ -26,8 +26,13 @@ pub fn format(store: &PatternStore, opts: &FormatOptions, scores: &HashMap<Patte
 
     // Header
     if !opts.no_banner {
+        let label_part = match &opts.source_label {
+            Some(label) => format!(" ({})", label),
+            None => String::new(),
+        };
         let header = format!(
-            " ctrlb-decompose: {} lines -> {} patterns ({:.1}% reduction) ",
+            " ctrlb-decompose{}: {} lines -> {} patterns ({:.1}% reduction) ",
+            label_part,
             format_count(total_lines),
             pattern_count,
             reduction

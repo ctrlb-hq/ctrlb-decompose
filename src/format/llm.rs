@@ -25,9 +25,13 @@ pub fn format(
         ),
         _ => String::new(),
     };
+    let label_part = match &opts.source_label {
+        Some(label) => format!(" ({})", label),
+        None => String::new(),
+    };
     out.push_str(&format!(
-        "## Log Analysis: {} lines -> {} patterns{}\n\n",
-        total_lines, pattern_count, time_range
+        "## Log Analysis{}: {} lines -> {} patterns{}\n\n",
+        label_part, total_lines, pattern_count, time_range
     ));
 
     // Partition patterns into critical vs high-volume.

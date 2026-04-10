@@ -65,6 +65,17 @@ fn test_context_includes_examples() {
 }
 
 #[test]
+fn test_llm_mode_suppresses_banner_by_default() {
+    let (_, stderr, success) = run_cli(&["--llm", "tests/fixtures/sample.log"]);
+    assert!(success);
+    assert!(
+        !stderr.contains("Powered by CtrlB"),
+        "LLM mode should suppress banner by default, got stderr: {}",
+        stderr
+    );
+}
+
+#[test]
 fn test_quiet_suppresses_stderr() {
     let (_, stderr, success) = run_cli(&["-q", "tests/fixtures/sample.log"]);
     assert!(success);
@@ -72,6 +83,45 @@ fn test_quiet_suppresses_stderr() {
         !stderr.contains("Processed"),
         "stderr should be suppressed with -q"
     );
+}
+
+#[test]
+fn test_source_label_human() {
+    let (stdout, _, success) = run_cli(&[
+        "--source-label", "pod-a",
+        "tests/fixtures/sample.log",
+    ]);
+    assert!(success);
+    assert!(
+        stdout.contains("pod-a"),
+        "Human output should include source label, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_source_label_llm() {
+    let (stdout, _, success) = run_cli(&[
+        "--llm", "--source-label", "pod-a",
+        "tests/fixtures/sample.log",
+    ]);
+    assert!(success);
+    assert!(
+        stdout.contains("(pod-a)"),
+        "LLM output should include source label in header, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_source_label_json() {
+    let (stdout, _, success) = run_cli(&[
+        "--json", "--source-label", "pod-a",
+        "tests/fixtures/sample.log",
+    ]);
+    assert!(success);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("invalid JSON");
+    assert_eq!(parsed["summary"]["source_label"], "pod-a");
 }
 
 #[test]
