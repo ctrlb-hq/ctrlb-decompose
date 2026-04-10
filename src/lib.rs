@@ -128,33 +128,40 @@ pub fn run(args: Args) -> Result<()> {
     let mut store = PatternStore::new(opts.context);
     let mut line_number: u64 = 0;
 
-    let mut raw_buf = Vec::new();
+    let mut line_buf = String::new();
+    let mut stripped_buf = String::new();
     loop {
-        raw_buf.clear();
-        let bytes_read = reader.read_until(b'\n', &mut raw_buf)?;
+        line_buf.clear();
+        let bytes_read = reader.read_line(&mut line_buf)?;
         if bytes_read == 0 {
             break;
         }
-        let line = String::from_utf8_lossy(&raw_buf).trim_end_matches('\n').trim_end_matches('\r').to_string();
+        let line = line_buf.trim_end_matches('\n').trim_end_matches('\r');
         if line.is_empty() {
             continue;
         }
         line_number += 1;
 
-        let ts_match = extract_timestamp(&line);
-        let stripped = match &ts_match {
-            Some(ts) => strip_timestamp(&line, ts),
-            None => line.clone(),
+        let ts_match = extract_timestamp(line);
+        let stripped: &str = match &ts_match {
+            Some(ts) => {
+                stripped_buf.clear();
+                stripped_buf.push_str(&line[..ts.start]);
+                stripped_buf.push_str("<TS>");
+                stripped_buf.push_str(&line[ts.end..]);
+                &stripped_buf
+            }
+            None => line,
         };
 
-        let parsed = pipeline.process_line(&stripped);
+        let parsed = pipeline.process_line(stripped);
 
         store.accumulate(
             parsed.pattern_id,
             &parsed.display_template,
             &parsed.variables,
             ts_match.map(|ts| ts.datetime),
-            &line,
+            line,
             line_number,
         );
     }

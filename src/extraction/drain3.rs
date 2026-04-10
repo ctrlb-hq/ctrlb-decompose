@@ -256,12 +256,14 @@ impl Drain {
 
     pub fn train(&mut self, content: &str) -> LogCluster {
         let content_tokens = self.get_content_as_tokens(content);
+        self.train_tokens(&content_tokens)
+    }
 
+    fn train_tokens(&mut self, content_tokens: &[&str]) -> LogCluster {
         let match_cluster_opt = {
-            // Clone needed values to avoid borrowing conflicts
             let sim_th = self.config.sim_th;
 
-            self.tree_search_impl(&content_tokens, sim_th, false)
+            self.tree_search_impl(content_tokens, sim_th, false)
         };
 
         // Match no existing log cluster
@@ -269,27 +271,27 @@ impl Drain {
             self.clusters_counter += 1;
             let cluster_id = self.clusters_counter;
 
+            let tokens_owned: Vec<String> = content_tokens.iter().map(|s| (*s).to_string()).collect();
+
             let match_cluster = LogCluster {
-                log_template_tokens: content_tokens.clone(),
+                log_template_tokens: tokens_owned.clone(),
                 id: cluster_id,
                 size: 1,
             };
 
             self.id_to_cluster.set(cluster_id, match_cluster);
-            // let mut root_node = self.root_node.clone();
-            // self.add_seq_to_prefix_tree(&mut root_node, cluster_id, &content_tokens);
-            self.add_seq_to_prefix_tree_helper(cluster_id, &content_tokens);
+            self.add_seq_to_prefix_tree_helper(cluster_id, content_tokens);
 
             // Return a new copy of the cluster
             LogCluster {
-                log_template_tokens: content_tokens,
+                log_template_tokens: tokens_owned,
                 id: cluster_id,
                 size: 1,
             }
         } else {
             let match_cluster = match_cluster_opt.unwrap();
             let new_template_tokens =
-                self.create_template(&content_tokens, &match_cluster.log_template_tokens);
+                self.create_template(content_tokens, &match_cluster.log_template_tokens);
 
             // Update the cluster in the cache
             if let Some(cluster) = self.id_to_cluster.get(match_cluster.id) {
@@ -317,19 +319,15 @@ impl Drain {
         self.tree_search(&root_node, &content_tokens, 1.0, true)
     }
 
-    fn get_content_as_tokens(&self, content: &str) -> Vec<String> {
-        let mut content = content.trim().to_string();
-        for extra_delimiter in &self.config.extra_delimiters {
-            content = content.replace(extra_delimiter, " ");
-        }
-        content.split_whitespace().map(|s| s.to_string()).collect()
+    fn get_content_as_tokens<'a>(&self, content: &'a str) -> Vec<&'a str> {
+        content.trim().split_whitespace().collect()
     }
 
     pub fn extract_template_and_vars(&mut self, content: &str) -> ParsedLog {
         let content_tokens = self.get_content_as_tokens(content);
 
-        // First train/match to get the cluster
-        let cluster = self.train(content);
+        // Train/match using the already-tokenized content (avoids double tokenization)
+        let cluster = self.train_tokens(&content_tokens);
 
         // Extract variables by comparing the template with the original content
         let mut variables = Vec::new();
@@ -340,7 +338,7 @@ impl Drain {
             {
                 variables.push(TypedVariable {
                     var_type: classify_variable(token),
-                    raw: token.clone(),
+                    raw: (*token).to_string(),
                 });
             }
         }
@@ -355,7 +353,7 @@ impl Drain {
 
     fn tree_search_impl(
         &mut self,
-        tokens: &[String],
+        tokens: &[&str],
         sim_th: f64,
         include_params: bool,
     ) -> Option<LogCluster> {
@@ -401,11 +399,11 @@ impl Drain {
                         break;
                     }
 
-                    let token = &tokens[i];
+                    let token = tokens[i];
 
                     if cur_node.key_to_child_node.contains_key(token) {
                         cur_node = &cur_node.key_to_child_node[token];
-                    } else if cur_node.key_to_child_node.contains_key(param_str) {
+                    } else if cur_node.key_to_child_node.contains_key(param_str.as_str()) {
                         cur_node = &cur_node.key_to_child_node[param_str];
                     } else {
                         return None;
@@ -424,7 +422,7 @@ impl Drain {
     }
 
     // Helper method to update the prefix tree while avoiding borrow issues
-    fn add_seq_to_prefix_tree_helper(&mut self, cluster_id: usize, tokens: &[String]) {
+    fn add_seq_to_prefix_tree_helper(&mut self, cluster_id: usize, tokens: &[&str]) {
         // Store values needed by add_seq_to_prefix_tree to avoid borrowing self completely
         let max_node_depth = self.config.max_node_depth;
         let param_string = self.config.param_string.clone();
@@ -445,7 +443,7 @@ impl Drain {
     fn tree_search(
         &mut self,
         root_node: &Node,
-        tokens: &[String],
+        tokens: &[&str],
         sim_th: f64,
         include_params: bool,
     ) -> Option<LogCluster> {
@@ -488,8 +486,8 @@ impl Drain {
                 break;
             }
 
-            let token = &tokens[i];
-            let param_str = &self.config.param_string;
+            let token = tokens[i];
+            let param_str = self.config.param_string.as_str();
 
             if cur_node.key_to_child_node.contains_key(token) {
                 cur_node = &cur_node.key_to_child_node[token];
@@ -510,13 +508,13 @@ impl Drain {
     fn fast_match(
         &mut self,
         cluster_ids: &[usize],
-        tokens: &[String],
+        tokens: &[&str],
         sim_th: f64,
         include_params: bool,
     ) -> Option<LogCluster> {
         let mut max_sim = -1.0;
         let mut max_param_count = -1;
-        let mut max_cluster: Option<LogCluster> = None;
+        let mut best_id: Option<usize> = None;
 
         // Extract the param_string before the loop to avoid borrowing conflicts
         let param_string = self.config.param_string.clone();
@@ -535,18 +533,20 @@ impl Drain {
                 if cur_sim > max_sim || (cur_sim == max_sim && param_count > max_param_count) {
                     max_sim = cur_sim;
                     max_param_count = param_count;
-
-                    max_cluster = Some(LogCluster {
-                        log_template_tokens: cluster.log_template_tokens.clone(),
-                        id: cluster.id,
-                        size: cluster.size,
-                    });
+                    best_id = Some(cluster_id);
                 }
             }
         }
 
         if max_sim >= sim_th {
-            max_cluster
+            // Only clone the winning cluster, not every candidate
+            best_id.and_then(|id| {
+                self.id_to_cluster.peek(id).map(|c| LogCluster {
+                    log_template_tokens: c.log_template_tokens.clone(),
+                    id: c.id,
+                    size: c.size,
+                })
+            })
         } else {
             None
         }
@@ -555,7 +555,7 @@ impl Drain {
     fn get_seq_distance(
         &self,
         seq1: &[String],
-        seq2: &[String],
+        seq2: &[&str],
         include_params: bool,
     ) -> (f64, i32) {
         get_seq_distance_static(seq1, seq2, include_params, &self.config.param_string)
@@ -661,7 +661,7 @@ impl Drain {
         s.chars().any(|c| c.is_numeric())
     }
 
-    fn create_template(&self, seq1: &[String], seq2: &[String]) -> Vec<String> {
+    fn create_template(&self, seq1: &[&str], seq2: &[String]) -> Vec<String> {
         if seq1.len() != seq2.len() {
             panic!("seq1 and seq2 must be of same length");
         }
@@ -680,7 +680,7 @@ impl Drain {
 
 fn get_seq_distance_static(
     seq1: &[String],
-    seq2: &[String],
+    seq2: &[&str],
     include_params: bool,
     param_string: &str,
 ) -> (f64, i32) {
@@ -692,8 +692,8 @@ fn get_seq_distance_static(
     let mut param_count = 0;
 
     for i in 0..seq1.len() {
-        let token1 = &seq1[i];
-        let token2 = &seq2[i];
+        let token1 = seq1[i].as_str();
+        let token2 = seq2[i];
 
         if token1 == param_string {
             param_count += 1;
@@ -714,7 +714,7 @@ fn get_seq_distance_static(
 fn add_seq_to_prefix_tree_impl(
     root_node: &mut Node,
     cluster_id: usize,
-    tokens: &[String],
+    tokens: &[&str],
     max_node_depth: usize,
     param_string: &str,
     max_children: usize,
@@ -744,7 +744,7 @@ fn add_seq_to_prefix_tree_impl(
     let mut current_depth = 1;
 
     for i in 0..tokens.len() {
-        let token = &tokens[i];
+        let token = tokens[i];
 
         // if at max depth or this is last token in template - add current log cluster to the leaf node
         if current_depth >= max_node_depth || current_depth >= token_count {
@@ -770,7 +770,7 @@ fn add_seq_to_prefix_tree_impl(
                     if cur_node.key_to_child_node.len() < max_children {
                         cur_node
                             .key_to_child_node
-                            .insert(token.clone(), Node::new());
+                            .insert(token.to_string(), Node::new());
                         cur_node = cur_node.key_to_child_node.get_mut(token).unwrap();
                     } else {
                         cur_node = cur_node.key_to_child_node.get_mut(param_string).unwrap();
@@ -778,7 +778,7 @@ fn add_seq_to_prefix_tree_impl(
                 } else if cur_node.key_to_child_node.len() + 1 < max_children {
                     cur_node
                         .key_to_child_node
-                        .insert(token.clone(), Node::new());
+                        .insert(token.to_string(), Node::new());
                     cur_node = cur_node.key_to_child_node.get_mut(token).unwrap();
                 } else if cur_node.key_to_child_node.len() + 1 == max_children {
                     cur_node

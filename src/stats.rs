@@ -106,6 +106,7 @@ pub struct CategoricalStats {
     pub total_count: u64,
     exact_counts: HashMap<String, u64>,
     hll: Option<HyperLogLogPlus<String, RandomState>>,
+    hll_dirty: bool,
     cached_unique: u64,
     capped: bool,
 }
@@ -116,6 +117,7 @@ impl CategoricalStats {
             total_count: 0,
             exact_counts: HashMap::new(),
             hll: None,
+            hll_dirty: false,
             cached_unique: 0,
             capped: false,
         }
@@ -131,10 +133,15 @@ impl CategoricalStats {
             }
             if let Some(ref mut hll) = self.hll {
                 hll.insert(&value.to_string());
-                self.cached_unique = hll.count().round() as u64;
+                self.hll_dirty = true;
             }
         } else {
-            *self.exact_counts.entry(value.to_string()).or_insert(0) += 1;
+            // Only allocate a String when the key is new
+            if let Some(count) = self.exact_counts.get_mut(value) {
+                *count += 1;
+            } else {
+                self.exact_counts.insert(value.to_string(), 1);
+            }
             self.cached_unique = self.exact_counts.len() as u64;
             if self.exact_counts.len() > CARDINALITY_CAP {
                 self.capped = true;
@@ -151,6 +158,16 @@ impl CategoricalStats {
 
     pub fn unique_count(&self) -> u64 {
         self.cached_unique
+    }
+
+    /// Recompute HLL cardinality if dirty. Called once during finalize().
+    pub fn flush_hll(&mut self) {
+        if self.hll_dirty {
+            if let Some(ref mut hll) = self.hll {
+                self.cached_unique = hll.count().round() as u64;
+            }
+            self.hll_dirty = false;
+        }
     }
 
     /// Returns top-k entries as (value, count, percentage)
@@ -382,10 +399,11 @@ impl PatternStore {
         stats.example_lines.push(raw_line.to_string());
     }
 
-    /// Run post-accumulation fixups (enum reclassification, etc.)
+    /// Run post-accumulation fixups (enum reclassification, HLL flush, etc.)
     pub fn finalize(&mut self) {
         for stats in self.patterns.values_mut() {
             for var in &mut stats.variables {
+                var.categorical.flush_hll();
                 var.check_enum_reclassify();
             }
         }
@@ -552,6 +570,8 @@ mod tests {
             cs.update(&format!("value_{}", i));
         }
         // After exceeding CARDINALITY_CAP (10_000), HLL should be active
+        // Must flush before reading unique_count (lazy computation)
+        cs.flush_hll();
         let unique = cs.unique_count();
         let expected = n as f64;
         let error = (unique as f64 - expected).abs() / expected;

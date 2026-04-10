@@ -91,16 +91,37 @@ impl EncodedVariable for EightByteEncodedVariable {
     }
 }
 
-/// Function to check if a character is a delimiter
+/// 256-byte lookup table: true = delimiter, false = non-delimiter.
+/// Non-delimiters are: '+', '-', '.', '0'-'9', 'A'-'Z', '_', 'a'-'z'
+static DELIM_TABLE: [bool; 256] = {
+    let mut table = [true; 256];
+    table[b'+' as usize] = false;
+    table[b'-' as usize] = false;
+    table[b'.' as usize] = false;
+    table[b'_' as usize] = false;
+    let mut i = b'0';
+    while i <= b'9' {
+        table[i as usize] = false;
+        i += 1;
+    }
+    i = b'A';
+    while i <= b'Z' {
+        table[i as usize] = false;
+        i += 1;
+    }
+    i = b'a';
+    while i <= b'z' {
+        table[i as usize] = false;
+        i += 1;
+    }
+    table
+};
+
+/// Function to check if a character is a delimiter (lookup table, branch-free)
+#[inline(always)]
 fn is_delim(c: char) -> bool {
-    // Everything except "+-.0-9A-Z\_a-z" is a delimiter
-    !(c == '+'
-        || c == '-'
-        || c == '.'
-        || c.is_ascii_digit()
-        || c.is_ascii_uppercase()
-        || c == '_'
-        || c.is_ascii_lowercase())
+    let b = c as u32;
+    if b < 256 { DELIM_TABLE[b as usize] } else { true }
 }
 
 /// Function to check if a character is a variable placeholder
