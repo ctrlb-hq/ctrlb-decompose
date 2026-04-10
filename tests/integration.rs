@@ -26,7 +26,9 @@ fn test_llm_output_sample_log() {
     let (stdout, _, success) = run_cli(&["--llm", "tests/fixtures/sample.log"]);
     assert!(success);
     assert!(stdout.contains("## Log Analysis:"));
-    assert!(stdout.contains("### Patterns"));
+    assert!(
+        stdout.contains("### Patterns") || stdout.contains("### Critical Patterns"),
+    );
 }
 
 #[test]

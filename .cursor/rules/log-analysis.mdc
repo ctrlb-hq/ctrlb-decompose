@@ -1,0 +1,21 @@
+---
+description: Use ctrlb-decompose to analyze log files before reading them raw
+globs: **/*.log
+alwaysApply: false
+---
+
+# Log File Analysis
+
+This project includes ctrlb-decompose, a log pattern extraction tool. When you encounter a `.log` file or are asked to analyze logs, run ctrlb-decompose first to get a structural summary:
+
+```bash
+./target/release/ctrlb-decompose <file> --llm --context 2 --quiet 2>/dev/null
+```
+
+This compresses raw log lines into patterns with typed variables, quantile stats (p50/p99), and anomaly detection. Errors and warnings are prioritized first.
+
+For JSON output: `./target/release/ctrlb-decompose <file> --json --quiet 2>/dev/null`
+
+For piped input: `kubectl logs pod | ./target/release/ctrlb-decompose --llm --source-label "pod-name"`
+
+Workflow: decompose first, identify patterns of interest, then grep or use `--context N` with a higher N to see more examples.
