@@ -1,0 +1,19 @@
+---
+source: tests/integration.rs
+expression: redacted
+---
+## Log Analysis: 20 lines -> 3 patterns, time span: 14:22:01-14:22:04 UTC
+
+### Critical Patterns (errors, warnings): 2
+1. [ERROR, 15.0%, 3 lines] <TS> ERROR [{id}] Timeout connecting to {ip}:{n3} after {duration}
+   [4 variable groups redacted]
+   [example redacted]
+   [example redacted]
+2. [WARN, 15.0%, 3 lines] <TS> WARN [{id}] Connection pool exhausted, waiting {duration}
+   [2 variable groups redacted]
+   [example redacted]
+   [example redacted]
+
+### High-Volume Patterns (top 1 by count):
+1. [70.0%] "<TS> INFO [{id}] Request from {ip} completed in {duration} status={status}"    (14 lines)
+   [example redacted]

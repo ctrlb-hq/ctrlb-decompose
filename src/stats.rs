@@ -45,6 +45,10 @@ impl<T> BoundedVec<T> {
     pub fn items(&self) -> &[T] {
         &self.items
     }
+
+    pub fn total_seen(&self) -> u64 {
+        self.total_seen
+    }
 }
 
 // --- NumericStats ---
@@ -384,10 +388,10 @@ impl PatternStore {
         }
     }
 
-    /// Patterns sorted by count descending
+    /// Patterns sorted by count descending, with pattern_id as a stable tie-breaker
     pub fn sorted_patterns(&self) -> Vec<&PatternStats> {
         let mut patterns: Vec<_> = self.patterns.values().collect();
-        patterns.sort_by(|a, b| b.count.cmp(&a.count));
+        patterns.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.pattern_id.cmp(&b.pattern_id)));
         patterns
     }
 
@@ -423,5 +427,247 @@ impl PatternStore {
         } else {
             Vec::new()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extraction::drain3::TypedVariable;
+    use crate::types::VarType;
+
+    // ---- BoundedVec tests ----
+
+    #[test]
+    fn test_bounded_vec_basic() {
+        let mut bv = BoundedVec::new(3);
+        bv.push(10);
+        bv.push(20);
+        bv.push(30);
+        assert_eq!(bv.items(), &[10, 20, 30]);
+        assert_eq!(bv.total_seen(), 3);
+    }
+
+    #[test]
+    fn test_bounded_vec_zero_capacity() {
+        let mut bv = BoundedVec::new(0);
+        bv.push(1);
+        bv.push(2);
+        bv.push(3);
+        assert!(bv.items().is_empty());
+        assert_eq!(bv.total_seen(), 3);
+    }
+
+    #[test]
+    fn test_bounded_vec_reservoir_sampling() {
+        let mut bv = BoundedVec::new(10);
+        for i in 0..1000 {
+            bv.push(i);
+        }
+        assert_eq!(bv.items().len(), 10);
+        assert_eq!(bv.total_seen(), 1000);
+    }
+
+    // ---- NumericStats tests ----
+
+    #[test]
+    fn test_numeric_stats_basic() {
+        let mut ns = NumericStats::new();
+        ns.update(10.0);
+        ns.update(20.0);
+        ns.update(30.0);
+        assert_eq!(ns.count, 3);
+        assert_eq!(ns.min, 10.0);
+        assert_eq!(ns.max, 30.0);
+        assert!((ns.mean() - 20.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_numeric_stats_empty() {
+        let ns = NumericStats::new();
+        assert_eq!(ns.count, 0);
+        assert!((ns.mean() - 0.0).abs() < f64::EPSILON);
+        assert!(ns.quantile(0.5).is_none());
+    }
+
+    #[test]
+    fn test_numeric_stats_nan_inf() {
+        // Documenting current behavior:
+        // - NaN is accepted (DDSketch silently handles it), count is incremented
+        // - Inf and -Inf cause DDSketch to panic internally
+        let mut ns = NumericStats::new();
+        ns.update(1.0);
+        ns.update(f64::NAN);
+        assert_eq!(ns.count, 2, "NaN should be counted");
+
+        let result = std::panic::catch_unwind(|| {
+            let mut ns = NumericStats::new();
+            ns.update(f64::INFINITY);
+            ns
+        });
+        assert!(result.is_err(), "DDSketch should panic on Inf");
+
+        let result = std::panic::catch_unwind(|| {
+            let mut ns = NumericStats::new();
+            ns.update(f64::NEG_INFINITY);
+            ns
+        });
+        assert!(result.is_err(), "DDSketch should panic on -Inf");
+    }
+
+    #[test]
+    fn test_numeric_stats_single_value() {
+        let mut ns = NumericStats::new();
+        ns.update(42.0);
+        assert_eq!(ns.count, 1);
+        assert_eq!(ns.min, 42.0);
+        assert_eq!(ns.max, 42.0);
+        assert!((ns.mean() - 42.0).abs() < f64::EPSILON);
+        assert!((ns.sum - 42.0).abs() < f64::EPSILON);
+    }
+
+    // ---- CategoricalStats tests ----
+
+    #[test]
+    fn test_categorical_stats_basic() {
+        let mut cs = CategoricalStats::new();
+        cs.update("a");
+        cs.update("a");
+        cs.update("b");
+        assert_eq!(cs.total_count, 3);
+        assert_eq!(cs.unique_count(), 2);
+        let top = cs.top_k(10);
+        assert_eq!(top.len(), 2);
+        // "a" should be first (count 2), "b" second (count 1)
+        assert_eq!(top[0].0, "a");
+        assert_eq!(top[0].1, 2);
+        assert_eq!(top[1].0, "b");
+        assert_eq!(top[1].1, 1);
+    }
+
+    #[test]
+    fn test_categorical_stats_empty() {
+        let cs = CategoricalStats::new();
+        assert_eq!(cs.total_count, 0);
+        assert_eq!(cs.unique_count(), 0);
+        assert!(cs.top_k(10).is_empty());
+    }
+
+    #[test]
+    fn test_categorical_stats_hll_transition() {
+        let mut cs = CategoricalStats::new();
+        let n = 12_000;
+        for i in 0..n {
+            cs.update(&format!("value_{}", i));
+        }
+        // After exceeding CARDINALITY_CAP (10_000), HLL should be active
+        let unique = cs.unique_count();
+        let expected = n as f64;
+        let error = (unique as f64 - expected).abs() / expected;
+        assert!(
+            error < 0.10,
+            "HLL estimate {} too far from expected {} (error: {:.2}%)",
+            unique,
+            n,
+            error * 100.0
+        );
+    }
+
+    // ---- parse_numeric_value tests ----
+
+    #[test]
+    fn test_parse_numeric_value_plain() {
+        assert!((parse_numeric_value("42").unwrap() - 42.0).abs() < f64::EPSILON);
+        assert!((parse_numeric_value("-3.14").unwrap() - (-3.14)).abs() < f64::EPSILON);
+        assert!((parse_numeric_value("0").unwrap() - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_parse_numeric_value_durations() {
+        assert!((parse_numeric_value("100ms").unwrap() - 100.0).abs() < f64::EPSILON);
+        assert!((parse_numeric_value("1s").unwrap() - 1000.0).abs() < f64::EPSILON);
+        assert!((parse_numeric_value("5m").unwrap() - 300_000.0).abs() < f64::EPSILON);
+        assert!((parse_numeric_value("2h").unwrap() - 7_200_000.0).abs() < f64::EPSILON);
+        assert!((parse_numeric_value("500us").unwrap() - 0.5).abs() < f64::EPSILON);
+        assert!((parse_numeric_value("500µs").unwrap() - 0.5).abs() < f64::EPSILON);
+        assert!((parse_numeric_value("1000ns").unwrap() - 0.001).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_parse_numeric_value_invalid() {
+        assert!(parse_numeric_value("hello").is_none());
+        assert!(parse_numeric_value("").is_none());
+        assert!(parse_numeric_value("abc123").is_none());
+        assert!(parse_numeric_value("ms").is_none());
+    }
+
+    #[test]
+    fn test_parse_numeric_value_special_floats() {
+        // Documenting current behavior: Rust's f64::parse accepts these
+        assert!(parse_numeric_value("inf").is_some());
+        assert!(parse_numeric_value("-inf").is_some());
+        assert!(parse_numeric_value("NaN").is_some());
+    }
+
+    // ---- VarSlotStats tests ----
+
+    #[test]
+    fn test_var_slot_stats_enum_reclassify() {
+        let mut slot = VarSlotStats::new(0);
+
+        // Feed 60 occurrences of 3 String-typed values (30+20+10)
+        for _ in 0..30 {
+            slot.update(&TypedVariable {
+                raw: "alpha".to_string(),
+                var_type: VarType::String,
+            });
+        }
+        for _ in 0..20 {
+            slot.update(&TypedVariable {
+                raw: "beta".to_string(),
+                var_type: VarType::String,
+            });
+        }
+        for _ in 0..10 {
+            slot.update(&TypedVariable {
+                raw: "gamma".to_string(),
+                var_type: VarType::String,
+            });
+        }
+
+        // Before reclassify, type should be String (majority vote)
+        assert_eq!(slot.var_type, VarType::String);
+
+        // After reclassify, should become Enum (60 occurrences, 3 unique, top 3 cover 100%)
+        slot.check_enum_reclassify();
+        assert_eq!(slot.var_type, VarType::Enum);
+    }
+
+    // ---- PatternStore tests ----
+
+    #[test]
+    fn test_pattern_store_accumulate() {
+        let mut store = PatternStore::new(5);
+
+        let vars1 = vec![TypedVariable {
+            raw: "200".to_string(),
+            var_type: VarType::Integer,
+        }];
+        let vars2 = vec![TypedVariable {
+            raw: "404".to_string(),
+            var_type: VarType::Integer,
+        }];
+
+        store.accumulate(1, "GET <*> HTTP/1.1", &vars1, None, "GET /foo HTTP/1.1", 1);
+        store.accumulate(1, "GET <*> HTTP/1.1", &vars2, None, "GET /bar HTTP/1.1", 2);
+
+        assert_eq!(store.global_line_count, 2);
+        assert_eq!(store.patterns.len(), 1);
+
+        let pattern = store.patterns.get(&1).unwrap();
+        assert_eq!(pattern.count, 2);
+        assert_eq!(pattern.first_seen_line, 1);
+        assert_eq!(pattern.last_seen_line, 2);
+        assert_eq!(pattern.variables.len(), 1);
     }
 }

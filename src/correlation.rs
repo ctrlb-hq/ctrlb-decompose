@@ -192,3 +192,116 @@ fn detect_lag_correlation(a: &[u64], b: &[u64], min_lag: usize, max_lag: usize) 
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stats::{BoundedVec, PatternStats, PatternStore};
+    use std::collections::HashMap;
+
+    // --- Pearson correlation tests ---
+
+    #[test]
+    fn test_pearson_correlation_perfect_positive() {
+        let a = vec![1, 2, 3, 4, 5];
+        let b = vec![2, 4, 6, 8, 10];
+        let r = pearson_correlation(&a, &b);
+        assert!((r - 1.0).abs() < 1e-9, "expected r ≈ 1.0, got {}", r);
+    }
+
+    #[test]
+    fn test_pearson_correlation_perfect_negative() {
+        let a = vec![1, 2, 3, 4, 5];
+        let b = vec![10, 8, 6, 4, 2];
+        let r = pearson_correlation(&a, &b);
+        assert!((r - (-1.0)).abs() < 1e-9, "expected r ≈ -1.0, got {}", r);
+    }
+
+    #[test]
+    fn test_pearson_correlation_zero() {
+        // Constant series has zero variance, should return 0.0
+        let a = vec![5, 5, 5, 5, 5];
+        let b = vec![1, 2, 3, 4, 5];
+        let r = pearson_correlation(&a, &b);
+        assert!(r.abs() < 1e-9, "expected r ≈ 0.0, got {}", r);
+    }
+
+    #[test]
+    fn test_pearson_correlation_too_short() {
+        let a = vec![1];
+        let b = vec![2];
+        let r = pearson_correlation(&a, &b);
+        assert_eq!(r, 0.0);
+    }
+
+    #[test]
+    fn test_pearson_correlation_empty() {
+        let a: Vec<u64> = vec![];
+        let b: Vec<u64> = vec![];
+        let r = pearson_correlation(&a, &b);
+        assert_eq!(r, 0.0);
+    }
+
+    #[test]
+    fn test_pearson_correlation_different_lengths() {
+        // Uses min(len) = 3; first 3 elements are perfectly positively correlated
+        let a = vec![1, 2, 3, 4, 5, 6, 7];
+        let b = vec![2, 4, 6];
+        let r = pearson_correlation(&a, &b);
+        assert!((r - 1.0).abs() < 1e-9, "expected r ≈ 1.0, got {}", r);
+    }
+
+    // --- Lag correlation tests ---
+
+    #[test]
+    fn test_detect_lag_correlation_basic() {
+        // Pattern a spikes, pattern b spikes one step later
+        let a = vec![0, 10, 0, 0, 10, 0, 0, 10, 0, 0];
+        let b = vec![0, 0, 10, 0, 0, 10, 0, 0, 10, 0];
+        let lag = detect_lag_correlation(&a, &b, 1, 3);
+        assert_eq!(lag, Some(1), "expected lag of 1");
+    }
+
+    #[test]
+    fn test_detect_lag_correlation_too_short() {
+        let a = vec![1, 2, 3];
+        let b = vec![1, 2, 3];
+        // max_lag=3, need n >= max_lag + 3 = 6, but n=3 so returns None
+        let lag = detect_lag_correlation(&a, &b, 1, 3);
+        assert_eq!(lag, None);
+    }
+
+    // --- is_error_pattern tests ---
+
+    fn make_pattern_stats(template: &str) -> PatternStats {
+        PatternStats {
+            pattern_id: 0,
+            template: template.to_string(),
+            count: 1,
+            first_seen_line: 1,
+            last_seen_line: 1,
+            first_ts: None,
+            last_ts: None,
+            variables: Vec::new(),
+            time_buckets: HashMap::new(),
+            example_lines: BoundedVec::new(0),
+        }
+    }
+
+    #[test]
+    fn test_is_error_pattern() {
+        assert!(is_error_pattern(&make_pattern_stats("ERROR: something failed")));
+        assert!(is_error_pattern(&make_pattern_stats("FATAL crash")));
+        assert!(is_error_pattern(&make_pattern_stats("PANIC at the disco")));
+        assert!(!is_error_pattern(&make_pattern_stats("INFO request completed")));
+    }
+
+    // --- find_correlations tests ---
+
+    #[test]
+    fn test_find_correlations_empty_store() {
+        let store = PatternStore::new(0);
+        let results = find_correlations(&store);
+        assert!(results.is_empty(), "expected no correlations from empty store");
+    }
+}

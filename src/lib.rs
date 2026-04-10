@@ -81,6 +81,11 @@ pub struct Args {
     /// Label for the log source (shown in output header)
     #[arg(long)]
     pub source_label: Option<String>,
+
+    /// Similarity threshold for pattern clustering (0.0-1.0, default: 0.5).
+    /// Lower merges more aggressively, higher produces more patterns.
+    #[arg(long, default_value_t = 0.5)]
+    pub sim_threshold: f64,
 }
 
 #[cfg(feature = "cli")]
@@ -103,6 +108,7 @@ impl Args {
             no_banner: self.no_banner || self.llm,
             output_mode: self.output_mode(),
             source_label: self.source_label.clone(),
+            sim_threshold: self.sim_threshold,
         }
     }
 }
@@ -116,7 +122,9 @@ pub fn run(args: Args) -> Result<()> {
 
     let opts = args.to_format_options();
 
-    let mut pipeline = ClpDrainPipeline::new(Config::default());
+    let mut config = Config::default();
+    config.sim_th = opts.sim_threshold;
+    let mut pipeline = ClpDrainPipeline::new(config);
     let mut store = PatternStore::new(opts.context);
     let mut line_number: u64 = 0;
 
@@ -186,7 +194,9 @@ pub struct AnalysisOutput {
 /// Process log text and return analysis results.
 /// This is the WASM-friendly entry point — no filesystem, no stdin.
 pub fn process_log_text(input: &str, opts: &FormatOptions) -> AnalysisOutput {
-    let mut pipeline = ClpDrainPipeline::new(Config::default());
+    let mut config = Config::default();
+    config.sim_th = opts.sim_threshold;
+    let mut pipeline = ClpDrainPipeline::new(config);
     let mut store = PatternStore::new(opts.context);
     let mut line_number: u64 = 0;
 

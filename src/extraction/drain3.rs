@@ -12,7 +12,7 @@ use crate::types::{PatternID, VarType};
 pub struct Config {
     max_node_depth: usize,
     log_cluster_depth: usize,
-    sim_th: f64,
+    pub sim_th: f64,
     max_children: usize,
     extra_delimiters: Vec<String>,
     max_clusters: usize,
@@ -24,7 +24,7 @@ impl Default for Config {
         Config {
             max_node_depth: 0, // Will be set to log_cluster_depth - 2 in Drain::new
             log_cluster_depth: 4,
-            sim_th: 0.4,
+            sim_th: 0.5,
             max_children: 100,
             extra_delimiters: Vec::new(),
             max_clusters: 10000, // 0 means no limit
@@ -938,5 +938,119 @@ mod tests {
         // Check that IP is classified correctly
         let ip_var = parsed.variables.iter().find(|v| v.var_type == VarType::IPv4);
         assert!(ip_var.is_some());
+    }
+
+    #[test]
+    fn test_lru_eviction_with_small_capacity() {
+        let config = Config {
+            max_clusters: 2,
+            ..Config::default()
+        };
+        let mut drain = Drain::new(config);
+
+        // Train 3 patterns with different token counts to force distinct clusters
+        drain.train("alpha beta gamma");
+        drain.train("one two three four");
+        drain.train("x y z w v");
+
+        assert!(
+            drain.clusters().len() <= 2,
+            "Expected at most 2 clusters after LRU eviction, got {}",
+            drain.clusters().len()
+        );
+    }
+
+    #[test]
+    fn test_train_empty_string() {
+        let config = Config::default();
+        let mut drain = Drain::new(config);
+
+        // Empty strings produce zero tokens, so tree search cannot match them.
+        // Each empty train creates a new cluster (no panic, deterministic ids).
+        let c1 = drain.train("");
+        let c2 = drain.train("");
+
+        assert!(c1.id > 0, "First empty-string cluster should have a positive id");
+        assert!(c2.id > 0, "Second empty-string cluster should have a positive id");
+        assert_eq!(c1.size, 1);
+        assert_eq!(c2.size, 1);
+    }
+
+    #[test]
+    fn test_train_single_token() {
+        let config = Config::default();
+        let mut drain = Drain::new(config);
+
+        let c1 = drain.train("hello");
+        let c2 = drain.train("hello");
+
+        assert_eq!(c1.id, c2.id, "Same single token should map to same cluster");
+        assert_eq!(c2.size, 2);
+
+        let c3 = drain.train("world");
+        assert_ne!(c1.id, c3.id, "Different single token should create a different cluster");
+    }
+
+    #[test]
+    fn test_match_log_returns_none_for_unseen() {
+        let config = Config::default();
+        let mut drain = Drain::new(config);
+
+        drain.train("Request from server completed");
+        let found = drain.match_log("Request from server completed");
+        assert!(found.is_some(), "match_log should find the trained pattern");
+
+        let not_found = drain.match_log("Something completely different here now");
+        assert!(not_found.is_none(), "match_log should return None for an unseen pattern");
+    }
+
+    #[test]
+    fn test_classify_variable_empty_string() {
+        assert_eq!(classify_variable(""), VarType::String);
+    }
+
+    #[test]
+    fn test_classify_variable_zero() {
+        assert_eq!(classify_variable("0"), VarType::Integer);
+    }
+
+    #[test]
+    fn test_classify_negative_float_starting_with_neg_zero() {
+        assert_eq!(classify_variable("-0.5"), VarType::Float);
+    }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn train_never_panics(
+                lines in proptest::collection::vec("[a-zA-Z0-9 ._=-]{1,100}", 1..=50)
+            ) {
+                let config = Config {
+                    max_clusters: 5,
+                    ..Config::default()
+                };
+                let mut drain = Drain::new(config);
+                for line in &lines {
+                    drain.train(line);
+                }
+                assert!(drain.clusters().len() <= 5);
+            }
+
+            #[test]
+            fn extract_template_and_vars_never_panics(
+                lines in proptest::collection::vec("[a-zA-Z0-9 ._=-]{1,100}", 2..=30)
+            ) {
+                let config = Config::default();
+                let mut drain = Drain::new(config);
+                for line in &lines {
+                    let parsed = drain.extract_template_and_vars(line);
+                    assert!(parsed.pattern_id > 0);
+                    assert!(parsed.count >= 1);
+                }
+            }
+        }
     }
 }

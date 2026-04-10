@@ -1,0 +1,157 @@
+---
+source: tests/integration.rs
+expression: parsed
+---
+{
+  "patterns": [
+    {
+      "count": 14,
+      "example_lines": "[1 examples]",
+      "frequency_pct": 70.0,
+      "id": 1,
+      "score": 14.0,
+      "severity": "info",
+      "template": "<TS> INFO [<*>] Request from <*> completed in <*> status=<*>",
+      "variables": [
+        {
+          "label": "id",
+          "slot": 0,
+          "top_values": "[10 values]",
+          "type": "HexID",
+          "unique_count": 14
+        },
+        {
+          "label": "ip",
+          "slot": 1,
+          "top_values": "[6 values]",
+          "type": "IPv4",
+          "unique_count": 6
+        },
+        {
+          "label": "duration",
+          "numeric": {
+            "max": 1847.0,
+            "mean": 188.5,
+            "min": 28.0,
+            "p50": 40.85681640262312,
+            "p99": 314.23517661052205
+          },
+          "slot": 2,
+          "top_values": "[10 values]",
+          "type": "Duration",
+          "unique_count": 14
+        },
+        {
+          "label": "status",
+          "numeric": {
+            "max": 503.0,
+            "mean": 243.1,
+            "min": 200.0,
+            "p50": 198.36848598125036,
+            "p99": 497.77940145582954
+          },
+          "slot": 3,
+          "top_values": "[3 values]",
+          "type": "Integer",
+          "unique_count": 3
+        }
+      ]
+    },
+    {
+      "count": 3,
+      "example_lines": "[1 examples]",
+      "frequency_pct": 15.0,
+      "id": 2,
+      "score": 15.0,
+      "severity": "warn",
+      "template": "<TS> WARN [<*>] Connection pool exhausted, waiting <*>",
+      "variables": [
+        {
+          "label": "id",
+          "slot": 0,
+          "top_values": "[3 values]",
+          "type": "HexID",
+          "unique_count": 3
+        },
+        {
+          "label": "duration",
+          "numeric": {
+            "max": 1400.0,
+            "mean": 603.3,
+            "min": 180.0,
+            "p50": 228.1791368405912,
+            "p99": 228.1791368405912
+          },
+          "slot": 1,
+          "top_values": "[3 values]",
+          "type": "Duration",
+          "unique_count": 3
+        }
+      ]
+    },
+    {
+      "count": 3,
+      "example_lines": "[1 examples]",
+      "frequency_pct": 15.0,
+      "id": 3,
+      "score": 57.0,
+      "severity": "error",
+      "template": "<TS> ERROR [<*>] Timeout connecting to <*>:<*> after <*>",
+      "variables": [
+        {
+          "label": "id",
+          "slot": 0,
+          "top_values": "[3 values]",
+          "type": "HexID",
+          "unique_count": 3
+        },
+        {
+          "label": "ip",
+          "slot": 1,
+          "top_values": "[3 values]",
+          "type": "IPv4",
+          "unique_count": 3
+        },
+        {
+          "label": "n3",
+          "numeric": {
+            "max": 5432.0,
+            "mean": 5432.0,
+            "min": 5432.0,
+            "p50": 5378.884813934975,
+            "p99": 5378.884813934975
+          },
+          "slot": 2,
+          "top_values": "[1 values]",
+          "type": "Integer",
+          "unique_count": 1
+        },
+        {
+          "label": "duration",
+          "numeric": {
+            "max": 5002.0,
+            "mean": 5000.0,
+            "min": 4998.0,
+            "p50": 4965.323255400035,
+            "p99": 4965.323255400035
+          },
+          "slot": 3,
+          "top_values": "[3 values]",
+          "type": "Duration",
+          "unique_count": 3
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "pattern_count": 3,
+    "patterns_omitted": 0,
+    "patterns_shown": 3,
+    "time_range": {
+      "end": "2024-01-15T14:22:04.500+00:00",
+      "start": "2024-01-15T14:22:01.100+00:00"
+    },
+    "total_lines": 20
+  },
+  "version": "0.1.0"
+}
