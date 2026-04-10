@@ -1,47 +1,53 @@
 ---
 name: analyze-logs
 description: >
-  Analyze log files or raw log text using ctrlb-decompose. Use when the user
-  asks to: analyze logs, investigate errors in log files, understand log patterns,
-  summarize a log file, detect anomalies, or identify the most common log events.
+  Use this skill when the user asks to: "analyze logs", "analyze this log file",
+  "what's in my logs", "investigate errors in logs", "find patterns in log file",
+  "summarize logs", "detect anomalies in logs", "parse log file", "understand log
+  output", "what are the most common errors", or shares a log file path or pastes
+  log content for review.
+version: 1.0.0
 ---
 
 # ctrlb-decompose Log Analysis
 
-## Before you begin — large log volumes
+## Overview
 
-**If the user signals they are about to paste log content** (e.g. "here are my
-logs", "let me paste some logs"), ask first:
+Analyze log files or raw log text using [ctrlb-decompose](https://github.com/ctrlb-hq/ctrlb-decompose) — a CLI that compresses millions of log lines into a handful of typed patterns with variable statistics, anomaly detection, and severity scoring. Output is optimized for LLM consumption via `--llm`.
 
-> About how many lines are you sharing? If it's more than ~100 lines, it's much
-> better to save them to a file and share the path — it keeps the conversation
-> context clean and ctrlb-decompose handles the file directly.
-> 
-> ```bash
-> # Save your logs to a file, then share the path:
-> ctrlb-decompose --llm --top 20 /path/to/your.log
-> ```
+## Workflow
 
-Only proceed with pasted content if:
-- The user insists on pasting, or
-- The volume is clearly small (a handful of lines)
-
-**After processing any pasted content:** do not quote, repeat, or reference
-individual raw log lines in your response. ctrlb-decompose already compressed
-them — treat the raw input as consumed and work only from the tool output.
+1. Gate large pastes — redirect to file path if volume is high
+2. Check if `ctrlb-decompose` is installed; install if not
+3. Run analysis on the file or pasted content
+4. Interpret results — lead with problems, surface anomalies, suggest next steps
 
 ---
 
-## Step 1 — Check installation
+## Large Paste Policy
 
-Run:
+If the user signals they are about to paste log content (e.g. "here are my logs", "let me paste some logs"), ask first:
+
+> About how many lines are you sharing? For more than ~100 lines, save to a file and share the path — it keeps context clean and ctrlb-decompose handles files directly:
+> ```bash
+> ctrlb-decompose --llm --top 20 /path/to/your.log
+> ```
+
+Proceed with pasted content only if the user insists or the volume is clearly small (a handful of lines).
+
+**After processing pasted content:** do not quote, repeat, or reference individual raw log lines. Work only from ctrlb-decompose output — the raw lines are consumed.
+
+---
+
+## Step 1 — Verify Installation
+
 ```bash
 which ctrlb-decompose
 ```
 
-If found, skip to Step 2.
+If found → skip to Step 2.
 
-If not found, detect the OS and offer to install:
+If not found → detect the OS:
 
 ```bash
 uname -s
@@ -49,71 +55,50 @@ uname -s
 
 ### macOS (Darwin)
 
-Check if Homebrew is available:
 ```bash
 which brew
 ```
 
-If Homebrew is available, ask the user:
-> ctrlb-decompose is not installed. I can install it via Homebrew. May I run:
-> ```
-> brew tap ctrlb-hq/tap && brew install ctrlb-decompose
-> ```
+**Homebrew found** — install ctrlb-decompose:
+```bash
+brew tap ctrlb-hq/tap && brew install ctrlb-decompose
+```
 
-If the user approves, run it, then verify with `which ctrlb-decompose`.
-
-If Homebrew is not installed, offer to install it first:
-> Homebrew is not installed either. I can install Homebrew and then ctrlb-decompose.
-> This will require your password. May I proceed?
-
-If approved, run the official Homebrew installer, then install ctrlb-decompose.
+**Homebrew not found** — install Homebrew first:
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+Then install ctrlb-decompose:
+```bash
+brew tap ctrlb-hq/tap && brew install ctrlb-decompose
+```
 
 ### Linux
 
-Check the distro:
 ```bash
 cat /etc/os-release
 ```
 
-**Debian / Ubuntu** (`ID=debian`, `ID=ubuntu`, or `ID_LIKE` contains `debian`):
-> ctrlb-decompose is not installed. May I run the following to install it?
-> ```
-> curl -LO https://github.com/ctrlb-hq/ctrlb-decompose/releases/latest/download/ctrlb-decompose_amd64.deb && sudo dpkg -i ctrlb-decompose_amd64.deb
-> ```
+| Distro | Install command |
+|--------|----------------|
+| Debian / Ubuntu (`ID=debian`, `ID=ubuntu`, or `ID_LIKE` contains `debian`) | `curl -LO https://github.com/ctrlb-hq/ctrlb-decompose/releases/latest/download/ctrlb-decompose_amd64.deb && sudo dpkg -i ctrlb-decompose_amd64.deb` |
+| RHEL / Fedora / CentOS (`ID` is `rhel`, `fedora`, or `centos`) | `curl -LO https://github.com/ctrlb-hq/ctrlb-decompose/releases/latest/download/ctrlb-decompose_amd64.rpm && sudo rpm -i ctrlb-decompose_amd64.rpm` |
+| Other Linux | `curl -LO https://github.com/ctrlb-hq/ctrlb-decompose/releases/latest/download/ctrlb-decompose-linux-x86_64 && chmod +x ctrlb-decompose-linux-x86_64 && sudo mv ctrlb-decompose-linux-x86_64 /usr/local/bin/ctrlb-decompose` |
 
-**RHEL / Fedora / CentOS** (`ID` is `rhel`, `fedora`, or `centos`):
-> ctrlb-decompose is not installed. May I run:
-> ```
-> curl -LO https://github.com/ctrlb-hq/ctrlb-decompose/releases/latest/download/ctrlb-decompose_amd64.rpm && sudo rpm -i ctrlb-decompose_amd64.rpm
-> ```
+### Fallback — Build from Source
 
-**Other Linux** (generic binary):
-> May I download the ctrlb-decompose binary and place it in /usr/local/bin?
-> ```
-> curl -LO https://github.com/ctrlb-hq/ctrlb-decompose/releases/latest/download/ctrlb-decompose-linux-x86_64 && chmod +x ctrlb-decompose-linux-x86_64 && sudo mv ctrlb-decompose-linux-x86_64 /usr/local/bin/ctrlb-decompose
-> ```
+If any installation method fails (wrong architecture, missing binary, package manager error):
 
-### Fallback — build from source
-
-If any installation method fails (wrong architecture, missing binary for the
-platform, package manager errors, download failures), offer to build from source:
-
-> Installation did not succeed. As a fallback, I can clone the repository and
-> build ctrlb-decompose from source. This requires `git` and the Rust toolchain.
-> May I proceed?
-
-Check prerequisites:
 ```bash
 which git && which cargo
 ```
 
-If `cargo` is missing, offer to install Rust first:
-> The Rust toolchain (`cargo`) is not installed. May I install it via rustup?
-> ```
-> curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env"
-> ```
+If `cargo` is missing, install Rust:
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env"
+```
 
-Once prerequisites are confirmed and approved, clone and build:
+Clone and build:
 ```bash
 git clone https://github.com/ctrlb-hq/ctrlb-decompose.git /tmp/ctrlb-decompose-build \
   && cd /tmp/ctrlb-decompose-build \
@@ -122,40 +107,35 @@ git clone https://github.com/ctrlb-hq/ctrlb-decompose.git /tmp/ctrlb-decompose-b
   && cd / && rm -rf /tmp/ctrlb-decompose-build
 ```
 
-Ask permission before each step if the user has not already given blanket approval.
-
-### After installation
-
-Run `which ctrlb-decompose` to confirm success, then continue to Step 2.
+Confirm with `which ctrlb-decompose`, then continue to Step 2.
 
 ---
 
-## Step 2 — Run analysis
+## Step 2 — Run Analysis
 
-Run ctrlb-decompose in LLM-optimized output mode.
-
-**When the user provides a file path:**
+**File path provided:**
 ```bash
 ctrlb-decompose --llm --top 20 "$FILE_PATH"
 ```
 
-**When the user pastes log text directly in the conversation:**
-
-Use the Write tool to save the pasted content to `/tmp/ctrlb_input.log` (this
-handles multi-line text, special characters, and quotes correctly), then run:
+**Pasted log text:** Use the Write tool to save content to `/tmp/ctrlb_input.log` (handles multi-line text, special characters, and quotes correctly), then:
 ```bash
 ctrlb-decompose --llm --top 20 /tmp/ctrlb_input.log && rm /tmp/ctrlb_input.log
 ```
 
-Use `--top 20` by default. If the user wants to see more patterns, use `--top 50`.
+Use `--top 20` by default. Increase to `--top 50` if the user wants more patterns. For all available flags and options, run `ctrlb-decompose --help`.
 
 ---
 
-## Step 3 — Interpret results
+## Step 3 — Interpret Results
 
-After running, summarize the output for the user:
+Present findings in this priority order:
 
-1. **Lead with problems** — highlight ERROR, FATAL, and WARN severity patterns first
-2. **Call out anomalies** — frequency spikes, high error rates, low-cardinality variables
-3. **Summarize key variables** — most common IPs, slowest durations (p99), notable enum values
-4. **Suggest next steps** — which patterns warrant further investigation and why
+| Priority | Focus | What to cover |
+|----------|-------|---------------|
+| 1st | **Problems** | ERROR, FATAL, WARN patterns — frequency, rate, associated variables |
+| 2nd | **Anomalies** | Frequency spikes, high error rates, unexpectedly low-cardinality variables |
+| 3rd | **Variable summaries** | Most common IPs, slowest durations (p99), notable enum distributions |
+| 4th | **Next steps** | Which patterns to drill into, what filters or time ranges to investigate |
+
+Keep the response grounded in ctrlb-decompose output. Do not speculate about root causes beyond what the pattern data supports.
