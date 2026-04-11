@@ -1,0 +1,12 @@
+{
+  "name": "ctrlb-decompose",
+  "description": "Analyze log files with ctrlb-decompose — pattern clustering, anomaly detection, and severity scoring",
+  "version": "1.0.0",
+  "author": {
+    "name": "CtrlB",
+    "email": "support@ctrlb.ai"
+  },
+  "homepage": "https://github.com/ctrlb-hq/ctrlb-decompose",
+  "repository": "https://github.com/ctrlb-hq/ctrlb-decompose",
+  "license": "MIT"
+}

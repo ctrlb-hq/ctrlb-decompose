@@ -206,6 +206,31 @@ Options:
 
 ---
 
+## Claude Code Plugin
+
+Use ctrlb-decompose directly from [Claude Code](https://claude.ai/code) — no CLI knowledge needed. The plugin installs ctrlb-decompose automatically and lets you analyze logs just by asking.
+
+### Install
+
+```
+/plugin marketplace add ctrlb-hq/ctrlb-decompose
+/plugin install ctrlb-decompose@ctrlb-hq
+```
+
+### Usage
+
+Just describe what you want in plain language:
+
+- "Analyze the errors in `/var/log/app.log`"
+- "What are the most common patterns in this log file?"
+- "Summarize these logs and highlight anomalies"
+
+Claude will check if ctrlb-decompose is installed (and walk you through installation if not), run the analysis, and explain the results — surfacing errors first, calling out anomalies, and suggesting what to investigate next.
+
+See [`plugin/README.md`](plugin/README.md) for full details.
+
+---
+
 ## License
 
 [MIT](LICENSE)
