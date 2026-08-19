@@ -25,7 +25,7 @@ $ cat server.log | ctrlb-decompose
     status      Enum    unique=3      values: 200 (91%), 404 (6%), 500 (3%)
 ```
 
-> Website coming soon.
+> Website: [ctrlb.ai](https://ctrlb.ai/)
 
 ---
 
