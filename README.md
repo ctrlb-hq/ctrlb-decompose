@@ -72,7 +72,7 @@ Pattern #2 (7,044 occurrences, 12.5%)
 | Resource | |
 |---|---|
 | **Live browser demo** | [ctrlb.ai/decompose](https://ctrlb.ai/decompose) |
-| **Claude Code plugin** | [plugin/README.md](plugin/README.md) |
+| **Claude Code plugin** | [github.com/ctrlb-hq/ctrlb-decompose/tree/main/plugin](https://github.com/ctrlb-hq/ctrlb-decompose/tree/main/plugin) |
 | **Research paper** | [ctrlb.ai/research](https://ctrlb.ai/research) |
 
 ---
@@ -345,7 +345,7 @@ Just describe what you want in plain language:
 
 Claude will check if ctrlb-decompose is installed (and walk you through installation if not), run the analysis, and explain the results — surfacing errors first, calling out anomalies, and suggesting what to investigate next.
 
-See [`plugin/README.md`](plugin/README.md) for full details.
+See [github.com/ctrlb-hq/ctrlb-decompose/tree/main/plugin](https://github.com/ctrlb-hq/ctrlb-decompose/tree/main/plugin) for full details.
 
 ---
 
