@@ -1,31 +1,79 @@
 # ctrlb-decompose
 
-**Compress raw log lines into structural patterns with statistics, anomalies, and correlations.**
+**Turn millions of noisy log lines into compact patterns with typed variables, quantiles, anomalies, and LLM-ready output.**
 
-Turn millions of noisy log lines into a handful of actionable patterns — with typed variables, quantile stats, anomaly flags, and severity scoring. Runs as a CLI, in the browser via WASM, or as a Rust library.
+Runs as a CLI, in the browser via WASM, or as a Rust library — no logs ever leave your machine.
 
-```
-$ cat server.log | ctrlb-decompose
-
-┌────────────────────────────────────────────────────────────────────┐
-│ ctrlb-decompose: 1,247,831 lines -> 43 patterns (99.9% reduction) │
-└────────────────────────────────────────────────────────────────────┘
-
-#1  [ERROR]  ██████████████████████  18,402 (1.5%)
-    <TS> ERROR [<*>] Connection to <ip> timed out after <duration>
-
-    ip          IPv4    unique=12     top: 10.0.1.15 (34%), 10.0.1.22 (28%)
-    duration    Duration               p50=120ms  p99=4.8s
-
-#2  [INFO]   ████████████████████    904,221 (72.5%)
-    <TS> INFO  [<*>] Request from <ip> completed in <duration> status=<status>
-
-    ip          IPv4    unique=1,847  top: 10.0.1.15 (12%), 10.0.1.22 (8%)
-    duration    Duration               p50=23ms   p99=312ms
-    status      Enum    unique=3      values: 200 (91%), 404 (6%), 500 (3%)
-```
+![ctrlb-decompose terminal demo](assets/demo.gif)
 
 > Website: [ctrlb.ai](https://ctrlb.ai/)
+
+---
+
+## Try it in 60 seconds
+
+No install, no signup — the whole pipeline (CLP encoding, Drain3 clustering, typing, stats) runs client-side in WebAssembly.
+
+1. Open **[ctrlb.ai/decompose](https://ctrlb.ai/decompose)**
+2. Paste or drop in a log file (or click **Generate Example** to try it with sample data)
+3. Hit **Analyze** and watch thousands of lines collapse into a handful of typed patterns
+
+---
+
+## Before / after
+
+A real 56,482-line Apache-style error log, decomposed live in the [browser demo](https://ctrlb.ai/decompose):
+
+**Before** — raw, repetitive, un-skimmable:
+
+```
+[Thu Jun 09 06:07:05 2005] [error] env.createBean2(): Factory error creating channel.jni:jni ( channel.jni, jni)
+[Thu Jun 09 06:07:05 2005] [error] config.update(): Can't create channel.jni:jni
+[Thu Jun 09 06:07:05 2005] [error] env.createBean2(): Factory error creating vm: ( vm, )
+[Thu Jun 09 06:07:05 2005] [error] config.update(): Can't create vm:
+[Thu Jun 09 06:07:05 2005] [error] env.createBean2(): Factory error creating worker.jni:onStartup ( worker.jni, onStartup)
+... 56,477 more lines like this ...
+```
+
+**After** — 25 typed patterns, ranked by volume, in 246ms:
+
+```
+ctrlb-decompose: 56,482 lines → 25 patterns (100.0% reduction)
+Time range: 06:07:04 UTC → 03:49:01 UTC
+
+Pattern #1 [ERROR] (20,862 occurrences, 36.9%)
+  "<TS> [error] [client <*>] <*> <*> <*> <*> <*>"
+  Variables:
+    IPv4:   456 unique values
+    String: 46 unique values
+    Enum:   does (100.0%), to (0.0%)
+    Enum:   not (100.0%), serve (0.0%)
+    Enum:   exist (100.0%), directory (0.0%)
+    String: 81 unique values
+
+Pattern #2 (7,044 occurrences, 12.5%)
+  ...
+```
+
+### Output modes
+
+**`HUMAN` mode** — colored, for terminal investigation:
+
+![Human-readable output](assets/human-output.png)
+
+**`LLM OPTIMIZE` mode** — compact markdown for feeding into an LLM:
+
+![LLM-optimized output](assets/llm-output.png)
+
+---
+
+## Resources
+
+| Resource | |
+|---|---|
+| **Live browser demo** | [ctrlb.ai/decompose](https://ctrlb.ai/decompose) |
+| **Claude Code plugin** | [plugin/README.md](plugin/README.md) |
+| **Research paper** | [ctrlb.ai/research](https://ctrlb.ai/research) |
 
 ---
 
@@ -198,11 +246,81 @@ Options:
 
 ## Output Formats
 
+ctrlb-decompose has three output modes, all driven off the same analysis pass — pick the one that fits where you're reading it. See the [before/after screenshots](#before--after) above for `--human` and `--llm` side by side in the browser demo.
+
 | Format | Flag | Best for |
 |--------|------|----------|
 | **Human** | `--human` (default) | Terminal investigation — colored, visual bars |
 | **LLM** | `--llm` | Feeding into LLMs — compact, token-efficient markdown |
 | **JSON** | `--json` | Programmatic consumption — structured, machine-readable |
+
+<details>
+<summary><b>Human</b> — <code>ctrlb-decompose server.log --top 2</code></summary>
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ ctrlb-decompose: 80,000 lines -> 3 patterns (100.0% reduction) │
+└──────────────────────────────────────────────────────────────────┘
+  Time range: 14:22:01 UTC -> 16:35:10 UTC
+
+Pattern #1 (75,211 occurrences, 94.0%)
+  "<TS> INFO [<*>] Request from <*> completed in <*> status=<*>"
+  Variables:
+    HexID:    804 unique values
+    IPv4:     27 unique values
+    Duration: mean=46, p50=45, p99=116, min=3, max=169
+    Integer:  mean=224, p50=198, p99=498, min=200, max=503
+
+Pattern #2 [WARN] (2,773 occurrences, 3.5%)
+  "<TS> WARN [<*>] Connection pool exhausted, waiting <*>"
+  Variables:
+    HexID:    726 unique values
+    Duration: mean=526, p50=529, p99=889, min=150, max=900
+```
+
+</details>
+
+<details>
+<summary><b>LLM</b> — <code>ctrlb-decompose server.log --llm</code></summary>
+
+Compact, token-efficient markdown designed to be pasted straight into a prompt — see the [LLM OPTIMIZE screenshot](#before--after) above for a full real-world example against a 56K-line log.
+
+</details>
+
+<details>
+<summary><b>JSON</b> — <code>ctrlb-decompose server.log --json --top 1</code></summary>
+
+```json
+{
+  "summary": {
+    "total_lines": 80000,
+    "pattern_count": 3,
+    "patterns_shown": 1,
+    "patterns_omitted": 2,
+    "time_range": {
+      "start": "2026-08-21T14:22:01.051+00:00",
+      "end": "2026-08-21T16:35:10.707+00:00"
+    }
+  },
+  "patterns": [
+    {
+      "id": 1,
+      "template": "<TS> INFO [<*>] Request from <*> completed in <*> status=<*>",
+      "count": 75211,
+      "frequency_pct": 94.0,
+      "severity": "info",
+      "variables": [
+        { "slot": 0, "type": "HexID", "unique_count": 804 },
+        { "slot": 1, "type": "IPv4", "unique_count": 27 },
+        { "slot": 2, "type": "Duration", "unique_count": 157 },
+        { "slot": 3, "type": "Integer", "unique_count": 4 }
+      ]
+    }
+  ]
+}
+```
+
+</details>
 
 ---
 
