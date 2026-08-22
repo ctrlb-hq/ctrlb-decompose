@@ -1,6 +1,4 @@
-use crate::extraction::clp::core::{
-    EightByteEncodedVariable, VariablePlaceholder, decode_message,
-};
+use crate::extraction::clp::core::{EightByteEncodedVariable, VariablePlaceholder, decode_message};
 use crate::extraction::clp::encoding::EncodingContext;
 use crate::extraction::drain3::{Config, Drain, TypedVariable, classify_variable};
 use crate::types::PatternID;
@@ -89,7 +87,11 @@ impl ClpDrainPipeline {
                 };
 
                 // Advance content cursors for this token (mirrors what we do with display cursors)
-                advance_clp_cursors(lt_tok, &mut content_encoded_cursor, &mut content_dict_cursor);
+                advance_clp_cursors(
+                    lt_tok,
+                    &mut content_encoded_cursor,
+                    &mut content_dict_cursor,
+                );
 
                 // Build display token: replace each CLP placeholder with <*> and extract vars
                 let (display_tok, tok_vars) = expand_clp_placeholders(
@@ -133,7 +135,8 @@ fn decode_clp_fragment(
     let enc_slice = &encoded_vars[*encoded_cursor..enc_end];
     let dict_slice = &dictionary_vars[*dict_cursor..dict_end];
 
-    let decoded = decode_message::<EightByteEncodedVariable>(logtype_fragment, enc_slice, dict_slice);
+    let decoded =
+        decode_message::<EightByteEncodedVariable>(logtype_fragment, enc_slice, dict_slice);
 
     *encoded_cursor += n_encoded;
     *dict_cursor += n_dict;
@@ -166,11 +169,7 @@ fn count_clp_vars(logtype: &str) -> (usize, usize) {
 }
 
 /// Advance CLP variable cursors past all placeholders in a logtype token.
-fn advance_clp_cursors(
-    logtype_token: &str,
-    encoded_cursor: &mut usize,
-    dict_cursor: &mut usize,
-) {
+fn advance_clp_cursors(logtype_token: &str, encoded_cursor: &mut usize, dict_cursor: &mut usize) {
     let (n_encoded, n_dict) = count_clp_vars(logtype_token);
     *encoded_cursor += n_encoded;
     *dict_cursor += n_dict;
@@ -296,10 +295,16 @@ mod tests {
         assert_eq!(r1.pattern_id, r2.pattern_id);
 
         // The UUIDs should be extracted as variables
-        let uuid_vars: Vec<_> = r2.variables.iter()
+        let uuid_vars: Vec<_> = r2
+            .variables
+            .iter()
             .filter(|v| v.raw.contains('-') && v.raw.len() > 30)
             .collect();
-        assert!(uuid_vars.len() >= 2, "Should extract UUIDs as variables, got: {:?}", r2.variables);
+        assert!(
+            uuid_vars.len() >= 2,
+            "Should extract UUIDs as variables, got: {:?}",
+            r2.variables
+        );
     }
 
     #[test]

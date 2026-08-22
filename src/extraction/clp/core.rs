@@ -1,5 +1,3 @@
-use std::mem;
-
 /// Variable placeholder types
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -38,11 +36,11 @@ impl EncodedVariable for FourByteEncodedVariable {
     const MAX_REPRESENTABLE_DIGITS: usize = 8;
 
     fn from_bits(bits: u32) -> Self {
-        unsafe { mem::transmute(bits) }
+        bits as i32
     }
 
     fn to_bits(self) -> u32 {
-        unsafe { mem::transmute(self) }
+        self as u32
     }
 
     fn as_u64(digits: Self::DigitsType) -> u64 {
@@ -68,11 +66,11 @@ impl EncodedVariable for EightByteEncodedVariable {
     const MAX_REPRESENTABLE_DIGITS: usize = 16;
 
     fn from_bits(bits: u64) -> Self {
-        unsafe { mem::transmute(bits) }
+        bits as i64
     }
 
     fn to_bits(self) -> u64 {
-        unsafe { mem::transmute(self) }
+        self as u64
     }
 
     fn as_u64(digits: Self::DigitsType) -> u64 {
@@ -123,7 +121,7 @@ fn could_be_multi_digit_hex_value(s: &str) -> bool {
 /// Function to get the bounds of the next variable in a string
 pub fn get_bounds_of_next_var(
     msg: &str,
-    mut begin_pos: usize,
+    _begin_pos: usize,
     mut end_pos: usize,
 ) -> Option<(usize, usize)> {
     // Ensure we start from a valid character boundary
@@ -136,6 +134,8 @@ pub fn get_bounds_of_next_var(
         end_pos += 1;
     }
 
+    let mut begin_pos;
+
     loop {
         begin_pos = end_pos;
 
@@ -143,7 +143,7 @@ pub fn get_bounds_of_next_var(
         let mut found_non_delim = false;
         for (offset, c) in msg[begin_pos..].char_indices() {
             if !is_delim(c) {
-                begin_pos = begin_pos + offset;
+                begin_pos += offset;
                 found_non_delim = true;
                 break;
             }
@@ -178,7 +178,7 @@ pub fn get_bounds_of_next_var(
         // Check if preceded by '=' character
         let preceded_by_equals = if begin_pos > 0 {
             // Get the character just before begin_pos
-            msg[..begin_pos].chars().last() == Some('=')
+            msg[..begin_pos].ends_with('=')
         } else {
             false
         };
@@ -201,63 +201,6 @@ pub fn get_bounds_of_next_var(
         None
     }
 }
-
-/// Function to get the bounds of the next variable in a string
-// fn get_bounds_of_next_var(msg: &str, mut begin_pos: usize, mut end_pos: usize) -> Option<(usize, usize)> {
-//     let msg_chars: Vec<char> = msg.chars().collect();
-//     let msg_length = msg_chars.len();
-
-//     if msg_length <= end_pos {
-//         return None;
-//     }
-
-//     loop {
-//         begin_pos = end_pos;
-
-//         // Find next non-delimiter
-//         while begin_pos < msg_length && is_delim(msg_chars[begin_pos]) {
-//             begin_pos += 1;
-//         }
-
-//         if msg_length == begin_pos {
-//             // Early exit for performance
-//             return None;
-//         }
-
-//         let mut contains_decimal_digit = false;
-//         let mut contains_alphabet = false;
-
-//         // Find next delimiter
-//         end_pos = begin_pos;
-//         while end_pos < msg_length && !is_delim(msg_chars[end_pos]) {
-//             let c = msg_chars[end_pos];
-//             if c.is_ascii_digit() {
-//                 contains_decimal_digit = true;
-//             } else if c.is_ascii_alphabetic() {
-//                 contains_alphabet = true;
-//             }
-//             end_pos += 1;
-//         }
-
-//         let variable = &msg[begin_pos..end_pos];
-
-//         // Treat token as variable if:
-//         // - it contains a decimal digit, or
-//         // - it's directly preceded by '=' and contains an alphabet char, or
-//         // - it could be a multi-digit hex value
-//         if contains_decimal_digit ||
-//            (begin_pos > 0 && msg_chars[begin_pos - 1] == '=' && contains_alphabet) ||
-//            could_be_multi_digit_hex_value(variable) {
-//             break;
-//         }
-//     }
-
-//     if msg_length != begin_pos {
-//         Some((begin_pos, end_pos))
-//     } else {
-//         None
-//     }
-// }
 
 /// Function to escape and append a constant to the logtype
 pub fn escape_and_append_const_to_logtype(constant: &str, logtype: &mut String) {
@@ -821,7 +764,7 @@ mod tests {
         let log_message8 = "<61>Jun 07 20:43:20 schneider8168 at[32]: You can't reboot the firewall without compressing the open-source AGP port!";
         let log_message9 = "INFO: Transaction completed successfully ✅. Amount: 150.75";
         let log_message10 = "E, [2025-03-13T10:01:32.963914 #1] ERROR -- : [7a7830d4888b86944a923fae] [45041ab2] This job will only processed if transaction is commited within next 239.24693170215542 minutes [batch:c524a91c-4d76-4b72-be1a-fb6f3e9d389f9]";
-        let log_message11 = "[<TS>] {var1} (INFO) [Invista] fetchViewData {'view_id':'879cc438-d86b-4f5b-bb53-2fe1b2a7cd9d','client_group_ids':['b41ceb7c-5b5a-4c27-b68d-13e912760492','8128b4a3-6d61-4afb-af90-8a6da1989c30','a2e8c6b7-f872-4e67-b102-3ee1a4c30ad3','0a2425da-e48b-4a37-9ec5-07cf09213fa6','b48e27c1-257a-4c57-962a-1993ac9ad470'],'page':1,'size':25}";//"2025-03-08T20:57:47.764Z pid=1 tid=cdwh class=TrackingCrawlerSqs jid=29380774527379748873p07c INFO: start [batch:e709957f-9ebc-453a-9aa1-4eddeebd625814]";
+        let log_message11 = "[<TS>] {var1} (INFO) [Invista] fetchViewData {'view_id':'879cc438-d86b-4f5b-bb53-2fe1b2a7cd9d','client_group_ids':['b41ceb7c-5b5a-4c27-b68d-13e912760492','8128b4a3-6d61-4afb-af90-8a6da1989c30','a2e8c6b7-f872-4e67-b102-3ee1a4c30ad3','0a2425da-e48b-4a37-9ec5-07cf09213fa6','b48e27c1-257a-4c57-962a-1993ac9ad470'],'page':1,'size':25}"; //"2025-03-08T20:57:47.764Z pid=1 tid=cdwh class=TrackingCrawlerSqs jid=29380774527379748873p07c INFO: start [batch:e709957f-9ebc-453a-9aa1-4eddeebd625814]";
 
         {
             let (logtype, encoded_vars, dictionary_vars) =

@@ -55,25 +55,19 @@ static RE_UUID: Lazy<Regex> = Lazy::new(|| {
         .unwrap()
 });
 
-static RE_IPV4: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$").unwrap()
-});
+static RE_IPV4: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$").unwrap());
 
-static RE_IPV6: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$").unwrap()
-});
+static RE_IPV6: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$").unwrap());
 
-static RE_DURATION: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^-?\d+\.?\d*(ns|us|µs|ms|s|m|h)$").unwrap()
-});
+static RE_DURATION: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^-?\d+\.?\d*(ns|us|µs|ms|s|m|h)$").unwrap());
 
-static RE_ISO_TIMESTAMP: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}").unwrap()
-});
+static RE_ISO_TIMESTAMP: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}").unwrap());
 
-static RE_HEX_ID: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^(0x)?[0-9a-fA-F]{4,}$").unwrap()
-});
+static RE_HEX_ID: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(0x)?[0-9a-fA-F]{4,}$").unwrap());
 
 /// Classify a raw variable string into a VarType.
 /// Order matters: more specific patterns are checked first.
@@ -129,7 +123,10 @@ pub fn classify_variable(value: &str) -> VarType {
     if RE_HEX_ID.is_match(value) {
         // Make sure it actually contains a-f chars (otherwise it's just a number)
         let hex_part = value.strip_prefix("0x").unwrap_or(value);
-        if hex_part.chars().any(|c| c.is_ascii_hexdigit() && !c.is_ascii_digit()) {
+        if hex_part
+            .chars()
+            .any(|c| c.is_ascii_hexdigit() && !c.is_ascii_digit())
+        {
             return VarType::HexID;
         }
     }
@@ -264,30 +261,8 @@ impl Drain {
             self.tree_search_impl(&content_tokens, sim_th, false)
         };
 
-        // Match no existing log cluster
-        if match_cluster_opt.is_none() {
-            self.clusters_counter += 1;
-            let cluster_id = self.clusters_counter;
-
-            let match_cluster = LogCluster {
-                log_template_tokens: content_tokens.clone(),
-                id: cluster_id,
-                size: 1,
-            };
-
-            self.id_to_cluster.set(cluster_id, match_cluster);
-            // let mut root_node = self.root_node.clone();
-            // self.add_seq_to_prefix_tree(&mut root_node, cluster_id, &content_tokens);
-            self.add_seq_to_prefix_tree_helper(cluster_id, &content_tokens);
-
-            // Return a new copy of the cluster
-            LogCluster {
-                log_template_tokens: content_tokens,
-                id: cluster_id,
-                size: 1,
-            }
-        } else {
-            let match_cluster = match_cluster_opt.unwrap();
+        // Match existing or create new cluster
+        if let Some(match_cluster) = match_cluster_opt {
             let new_template_tokens =
                 self.create_template(&content_tokens, &match_cluster.log_template_tokens);
 
@@ -305,6 +280,25 @@ impl Drain {
             } else {
                 // This should not happen if the cache is working correctly
                 panic!("Cluster not found in cache after match");
+            }
+        } else {
+            self.clusters_counter += 1;
+            let cluster_id = self.clusters_counter;
+
+            let match_cluster = LogCluster {
+                log_template_tokens: content_tokens.clone(),
+                id: cluster_id,
+                size: 1,
+            };
+
+            self.id_to_cluster.set(cluster_id, match_cluster);
+            self.add_seq_to_prefix_tree_helper(cluster_id, &content_tokens);
+
+            // Return a new copy of the cluster
+            LogCluster {
+                log_template_tokens: content_tokens,
+                id: cluster_id,
+                size: 1,
             }
         }
     }
@@ -372,7 +366,7 @@ impl Drain {
         }
 
         // Find the path to the correct node, collecting cluster IDs
-        let mut cluster_ids = Vec::new();
+        let cluster_ids;
         {
             let cur_node = &self.root_node.key_to_child_node[&token_count_str];
 
@@ -386,11 +380,10 @@ impl Drain {
             } else {
                 // Navigate through the tree
                 let mut cur_node = cur_node;
-                let mut cur_node_depth = 1;
                 let param_str = &self.config.param_string;
                 let max_depth = self.config.max_node_depth;
 
-                for i in 0..tokens.len() {
+                for (cur_node_depth, token) in (1..).zip(tokens.iter()) {
                     // at max depth
                     if cur_node_depth >= max_depth {
                         break;
@@ -401,8 +394,6 @@ impl Drain {
                         break;
                     }
 
-                    let token = &tokens[i];
-
                     if cur_node.key_to_child_node.contains_key(token) {
                         cur_node = &cur_node.key_to_child_node[token];
                     } else if cur_node.key_to_child_node.contains_key(param_str) {
@@ -410,8 +401,6 @@ impl Drain {
                     } else {
                         return None;
                     }
-
-                    cur_node_depth += 1;
                 }
 
                 // Store cluster IDs from the found node
@@ -461,25 +450,26 @@ impl Drain {
 
         // handle case of empty log string - return the single cluster in that group
         if token_count == 0 {
-            if !cur_node.cluster_ids.is_empty() {
-                if let Some(cluster) = self.id_to_cluster.get(cur_node.cluster_ids[0]) {
-                    return Some(LogCluster {
-                        log_template_tokens: cluster.log_template_tokens.clone(),
-                        id: cluster.id,
-                        size: cluster.size,
-                    });
-                }
+            if !cur_node.cluster_ids.is_empty()
+                && let Some(cluster) = self.id_to_cluster.get(cur_node.cluster_ids[0])
+            {
+                return Some(LogCluster {
+                    log_template_tokens: cluster.log_template_tokens.clone(),
+                    id: cluster.id,
+                    size: cluster.size,
+                });
             }
             return None;
         }
 
         // find the leaf node for this log - a path of nodes matching the first N tokens (N=tree depth)
         let mut cur_node = cur_node;
-        let mut cur_node_depth = 1;
+        let param_str = &self.config.param_string;
+        let max_depth = self.config.max_node_depth;
 
-        for i in 0..tokens.len() {
+        for (cur_node_depth, token) in (1..).zip(tokens.iter()) {
             // at max depth
-            if cur_node_depth >= self.config.max_node_depth {
+            if cur_node_depth >= max_depth {
                 break;
             }
 
@@ -488,9 +478,6 @@ impl Drain {
                 break;
             }
 
-            let token = &tokens[i];
-            let param_str = &self.config.param_string;
-
             if cur_node.key_to_child_node.contains_key(token) {
                 cur_node = &cur_node.key_to_child_node[token];
             } else if cur_node.key_to_child_node.contains_key(param_str) {
@@ -498,8 +485,6 @@ impl Drain {
             } else {
                 return None;
             }
-
-            cur_node_depth += 1;
         }
 
         // get best match among all clusters with same prefix, or None if no match is above sim_th
@@ -545,120 +530,7 @@ impl Drain {
             }
         }
 
-        if max_sim >= sim_th {
-            max_cluster
-        } else {
-            None
-        }
-    }
-
-    fn get_seq_distance(
-        &self,
-        seq1: &[String],
-        seq2: &[String],
-        include_params: bool,
-    ) -> (f64, i32) {
-        get_seq_distance_static(seq1, seq2, include_params, &self.config.param_string)
-    }
-
-    fn add_seq_to_prefix_tree(
-        &mut self,
-        root_node: &mut Node,
-        cluster_id: usize,
-        tokens: &[String],
-    ) {
-        let token_count = tokens.len();
-        let token_count_str = token_count.to_string();
-
-        if !root_node.key_to_child_node.contains_key(&token_count_str) {
-            root_node
-                .key_to_child_node
-                .insert(token_count_str.clone(), Node::new());
-        }
-
-        let first_layer_node = root_node
-            .key_to_child_node
-            .get_mut(&token_count_str)
-            .unwrap();
-
-        // handle case of empty log string
-        if token_count == 0 {
-            first_layer_node.cluster_ids.push(cluster_id);
-            return;
-        }
-
-        let mut cur_node = first_layer_node;
-        let mut current_depth = 1;
-
-        for i in 0..tokens.len() {
-            let token = &tokens[i];
-
-            // if at max depth or this is last token in template - add current log cluster to the leaf node
-            if current_depth >= self.config.max_node_depth || current_depth >= token_count {
-                // Clean up stale clusters before adding a new one
-                let mut new_cluster_ids = Vec::new();
-
-                for &id in &cur_node.cluster_ids {
-                    if self.id_to_cluster.peek(id).is_some() {
-                        new_cluster_ids.push(id);
-                    }
-                }
-
-                new_cluster_ids.push(cluster_id);
-                cur_node.cluster_ids = new_cluster_ids;
-                break;
-            }
-
-            // if token not matched in this layer of existing tree
-            if !cur_node.key_to_child_node.contains_key(token) {
-                // if token doesn't contain any numbers
-                if !Self::has_numbers(token) {
-                    let param_str = self.config.param_string.clone();
-
-                    if cur_node.key_to_child_node.contains_key(&param_str) {
-                        if cur_node.key_to_child_node.len() < self.config.max_children {
-                            cur_node
-                                .key_to_child_node
-                                .insert(token.clone(), Node::new());
-                            cur_node = cur_node.key_to_child_node.get_mut(token).unwrap();
-                        } else {
-                            cur_node = cur_node.key_to_child_node.get_mut(&param_str).unwrap();
-                        }
-                    } else if cur_node.key_to_child_node.len() + 1 < self.config.max_children {
-                        cur_node
-                            .key_to_child_node
-                            .insert(token.clone(), Node::new());
-                        cur_node = cur_node.key_to_child_node.get_mut(token).unwrap();
-                    } else if cur_node.key_to_child_node.len() + 1 == self.config.max_children {
-                        cur_node
-                            .key_to_child_node
-                            .insert(param_str.clone(), Node::new());
-                        cur_node = cur_node.key_to_child_node.get_mut(&param_str).unwrap();
-                    } else {
-                        cur_node = cur_node.key_to_child_node.get_mut(&param_str).unwrap();
-                    }
-                } else {
-                    let param_str = self.config.param_string.clone();
-
-                    if !cur_node.key_to_child_node.contains_key(&param_str) {
-                        cur_node
-                            .key_to_child_node
-                            .insert(param_str.clone(), Node::new());
-                    }
-
-                    cur_node = cur_node.key_to_child_node.get_mut(&param_str).unwrap();
-                }
-            } else {
-                // if the token is matched
-                cur_node = cur_node.key_to_child_node.get_mut(token).unwrap();
-            }
-
-            current_depth += 1;
-        }
-    }
-
-    fn has_numbers(s: &str) -> bool {
-        s.chars().any(|c| c.is_numeric())
+        if max_sim >= sim_th { max_cluster } else { None }
     }
 
     fn create_template(&self, seq1: &[String], seq2: &[String]) -> Vec<String> {
@@ -741,11 +613,8 @@ fn add_seq_to_prefix_tree_impl(
     }
 
     let mut cur_node = first_layer_node;
-    let mut current_depth = 1;
 
-    for i in 0..tokens.len() {
-        let token = &tokens[i];
-
+    for (current_depth, token) in (1..).zip(tokens.iter()) {
         // if at max depth or this is last token in template - add current log cluster to the leaf node
         if current_depth >= max_node_depth || current_depth >= token_count {
             // Clean up stale clusters before adding a new one
@@ -801,8 +670,6 @@ fn add_seq_to_prefix_tree_impl(
             // if the token is matched
             cur_node = cur_node.key_to_child_node.get_mut(token).unwrap();
         }
-
-        current_depth += 1;
     }
 }
 
@@ -910,10 +777,7 @@ mod tests {
             classify_variable("2024-01-15T14:22:01.123Z"),
             VarType::Timestamp
         );
-        assert_eq!(
-            classify_variable("2024-01-15 14:22:01"),
-            VarType::Timestamp
-        );
+        assert_eq!(classify_variable("2024-01-15 14:22:01"), VarType::Timestamp);
     }
 
     #[test]
@@ -930,13 +794,16 @@ mod tests {
 
         // Train with similar lines to establish a pattern
         drain.train("Request from 10.0.1.15 completed in 45ms status=200");
-        let parsed =
-            drain.extract_template_and_vars("Request from 192.168.1.1 completed in 100ms status=500");
+        let parsed = drain
+            .extract_template_and_vars("Request from 192.168.1.1 completed in 100ms status=500");
 
         // Should have variables extracted with types
         assert!(!parsed.variables.is_empty());
         // Check that IP is classified correctly
-        let ip_var = parsed.variables.iter().find(|v| v.var_type == VarType::IPv4);
+        let ip_var = parsed
+            .variables
+            .iter()
+            .find(|v| v.var_type == VarType::IPv4);
         assert!(ip_var.is_some());
     }
 }
