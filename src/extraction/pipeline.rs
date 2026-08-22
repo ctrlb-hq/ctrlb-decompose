@@ -32,21 +32,18 @@ impl ClpDrainPipeline {
     /// Process a single log line (already timestamp-stripped) through the pipeline.
     pub fn process_line(&mut self, stripped: &str) -> PipelineParsedLog {
         // Step 1: CLP encode — normalize variables into placeholders
-        let (logtype, encoded_vars, dictionary_vars) = {
-            let (lt, ev, dv) = self.clp_ctx.encode_message(stripped);
-            (lt.to_string(), ev.to_vec(), dv.to_vec())
-        };
+        let (logtype, encoded_vars, dictionary_vars) = self.clp_ctx.encode_message(stripped);
 
         // Step 2: Feed CLP logtype to Drain3 for structural clustering
-        let parsed = self.drain.extract_template_and_vars(&logtype);
+        let parsed = self.drain.extract_template_and_vars(logtype);
 
         // Step 3: Merge CLP variables + Drain3 wildcards into unified output
         let drain_template = &parsed.template;
         let drain_tokens: Vec<&str> = drain_template.split_whitespace().collect();
         let logtype_tokens: Vec<&str> = logtype.split_whitespace().collect();
 
-        let mut display_parts: Vec<String> = Vec::new();
-        let mut variables: Vec<TypedVariable> = Vec::new();
+        let mut display_template = String::with_capacity(drain_template.len());
+        let mut variables: Vec<TypedVariable> = Vec::with_capacity(4);
 
         // Cursors into CLP variable arrays
         let mut encoded_cursor: usize = 0;
@@ -60,6 +57,9 @@ impl ClpDrainPipeline {
         let mut content_dict_cursor: usize = 0;
 
         for (i, drain_tok) in drain_tokens.iter().enumerate() {
+            if i > 0 {
+                display_template.push(' ');
+            }
             if *drain_tok == "<*>" {
                 // Drain3 wildcard: the entire logtype token at this position varied.
                 // Decode the original text from the CLP logtype token + vars.
@@ -67,9 +67,9 @@ impl ClpDrainPipeline {
                     let lt_tok = logtype_tokens[i];
                     let raw = decode_clp_fragment(
                         lt_tok,
-                        &encoded_vars,
+                        encoded_vars,
                         &mut content_encoded_cursor,
-                        &dictionary_vars,
+                        dictionary_vars,
                         &mut content_dict_cursor,
                     );
                     variables.push(TypedVariable {
@@ -77,7 +77,7 @@ impl ClpDrainPipeline {
                         raw,
                     });
                 }
-                display_parts.push("<*>".to_string());
+                display_template.push_str("<*>");
             } else {
                 // Fixed token in the Drain3 template. It may contain CLP placeholders.
                 let lt_tok = if i < logtype_tokens.len() {
@@ -94,19 +94,17 @@ impl ClpDrainPipeline {
                 );
 
                 // Build display token: replace each CLP placeholder with <*> and extract vars
-                let (display_tok, tok_vars) = expand_clp_placeholders(
+                append_clp_placeholders(
                     drain_tok,
-                    &encoded_vars,
+                    encoded_vars,
                     &mut encoded_cursor,
-                    &dictionary_vars,
+                    dictionary_vars,
                     &mut dict_cursor,
+                    &mut display_template,
+                    &mut variables,
                 );
-                display_parts.push(display_tok);
-                variables.extend(tok_vars);
             }
         }
-
-        let display_template = display_parts.join(" ");
 
         PipelineParsedLog {
             pattern_id: parsed.pattern_id,
@@ -176,21 +174,20 @@ fn advance_clp_cursors(logtype_token: &str, encoded_cursor: &mut usize, dict_cur
 }
 
 /// Replace CLP placeholder chars in a Drain3 template token with `<*>`,
-/// extracting typed variables for each placeholder.
-fn expand_clp_placeholders(
+/// appending typed variables and writing display text directly into `display`.
+fn append_clp_placeholders(
     drain_token: &str,
     encoded_vars: &[EightByteEncodedVariable],
     encoded_cursor: &mut usize,
     dictionary_vars: &[String],
     dict_cursor: &mut usize,
-) -> (String, Vec<TypedVariable>) {
+    display: &mut String,
+    vars: &mut Vec<TypedVariable>,
+) {
     let escape_char = VariablePlaceholder::Escape as u8 as char;
     let int_char = VariablePlaceholder::Integer as u8 as char;
     let float_char = VariablePlaceholder::Float as u8 as char;
     let dict_char = VariablePlaceholder::Dictionary as u8 as char;
-
-    let mut display = String::with_capacity(drain_token.len());
-    let mut vars = Vec::new();
 
     let mut chars = drain_token.chars();
     while let Some(c) = chars.next() {
@@ -255,8 +252,6 @@ fn expand_clp_placeholders(
             display.push(c);
         }
     }
-
-    (display, vars)
 }
 
 #[cfg(test)]

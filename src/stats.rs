@@ -194,7 +194,7 @@ pub struct VarSlotStats {
     pub var_type: VarType,
     pub numeric: Option<NumericStats>,
     pub categorical: CategoricalStats,
-    type_votes: HashMap<VarType, u64>,
+    type_votes: [u64; 10],
 }
 
 impl VarSlotStats {
@@ -204,19 +204,13 @@ impl VarSlotStats {
             var_type: VarType::String,
             numeric: None,
             categorical: CategoricalStats::new(),
-            type_votes: HashMap::new(),
+            type_votes: [0; 10],
         }
     }
 
     pub fn update(&mut self, var: &TypedVariable) {
-        // Vote on type (majority wins, deterministic tie-breaking)
-        *self.type_votes.entry(var.var_type).or_insert(0) += 1;
-        self.var_type = *self
-            .type_votes
-            .iter()
-            .max_by(|a, b| a.1.cmp(b.1).then_with(|| a.0.cmp(b.0)))
-            .unwrap()
-            .0;
+        // Fast vote recording into fixed array
+        self.type_votes[var.var_type as usize] += 1;
 
         // Always update categorical
         self.categorical.update(&var.raw);
@@ -234,6 +228,18 @@ impl VarSlotStats {
     }
 
     pub fn finalize(&mut self) {
+        // Resolve type vote (majority wins, deterministic tie-breaking on enum order)
+        let mut max_votes = 0;
+        let mut best_type = self.var_type;
+        for &vt in &VarType::ALL {
+            let votes = self.type_votes[vt as usize];
+            if votes > max_votes || (votes == max_votes && max_votes > 0 && vt < best_type) {
+                max_votes = votes;
+                best_type = vt;
+            }
+        }
+        self.var_type = best_type;
+
         self.categorical.finalize();
         self.check_enum_reclassify();
     }
@@ -363,9 +369,10 @@ impl PatternStore {
             .entry(pattern_id)
             .or_insert_with(|| PatternStats::new(pattern_id, template.to_string(), ctx));
 
-        // Always update template to the latest from Drain3 — it evolves
-        // as more lines are seen (more positions become <*>)
-        stats.template = template.to_string();
+        // Update template only when it changes from Drain3
+        if stats.template != template {
+            stats.template = template.to_string();
+        }
 
         stats.count += 1;
         if stats.first_seen_line == 0 {
@@ -401,8 +408,10 @@ impl PatternStore {
             stats.variables[i].update(var);
         }
 
-        // Example lines
-        stats.example_lines.push(raw_line.to_string());
+        // Example lines (only allocate string when context lines > 0)
+        if self.context_lines > 0 {
+            stats.example_lines.push(raw_line.to_string());
+        }
     }
 
     /// Run post-accumulation fixups (finalize categorical HLL, enum reclassification, etc.)
@@ -514,7 +523,11 @@ mod tests {
             var_type: VarType::Integer,
         });
 
+        slot1.finalize();
+        slot2.finalize();
+
         assert_eq!(slot1.var_type, slot2.var_type);
+        assert_eq!(slot1.var_type, VarType::Integer);
     }
 
     #[test]
@@ -542,5 +555,35 @@ mod tests {
 
         assert_eq!(bounded.items().len(), 5);
         assert_eq!(bounded.total_seen, 100);
+    }
+
+    #[test]
+    fn test_var_slot_stats_finalize_type_voting() {
+        let mut slot = VarSlotStats::new(0);
+        // Cast 2 votes for Integer, 1 for String
+        slot.update(&TypedVariable {
+            raw: "100".to_string(),
+            var_type: VarType::Integer,
+        });
+        slot.update(&TypedVariable {
+            raw: "200".to_string(),
+            var_type: VarType::Integer,
+        });
+        slot.update(&TypedVariable {
+            raw: "text".to_string(),
+            var_type: VarType::String,
+        });
+
+        slot.finalize();
+        assert_eq!(slot.var_type, VarType::Integer);
+    }
+
+    #[test]
+    fn test_bounded_vec_zero_capacity() {
+        let mut bounded = BoundedVec::new(0);
+        bounded.push("line1".to_string());
+        bounded.push("line2".to_string());
+        assert_eq!(bounded.items().len(), 0);
+        assert_eq!(bounded.total_seen, 2);
     }
 }

@@ -226,7 +226,9 @@ impl Node {
 
 pub struct Drain {
     config: Config,
-    root_node: Node,
+    /// First level of the prefix tree keyed by token count (usize).
+    /// Using usize directly avoids allocating a String key on every traversal.
+    count_to_node: HashMap<usize, Node>,
     id_to_cluster: LogClusterCache,
     clusters_counter: usize,
 }
@@ -241,7 +243,7 @@ impl Drain {
 
         Drain {
             config: local_config.clone(),
-            root_node: Node::new(),
+            count_to_node: HashMap::new(),
             id_to_cluster: LogClusterCache::new(local_config.max_clusters),
             clusters_counter: 0,
         }
@@ -253,50 +255,47 @@ impl Drain {
 
     pub fn train(&mut self, content: &str) -> LogCluster {
         let content_tokens = self.get_content_as_tokens(content);
+        self.train_with_tokens(&content_tokens)
+    }
 
+    /// Train with pre-computed tokens — avoids re-tokenizing when the caller
+    /// already holds the token list (e.g. `extract_template_and_vars`).
+    /// Takes a borrow so the caller keeps ownership; only clones when inserting
+    /// a brand-new cluster into the cache (rare — once per distinct pattern).
+    fn train_with_tokens(&mut self, content_tokens: &[String]) -> LogCluster {
         let match_cluster_opt = {
-            // Clone needed values to avoid borrowing conflicts
             let sim_th = self.config.sim_th;
-
-            self.tree_search_impl(&content_tokens, sim_th, false)
+            self.tree_search_impl(content_tokens, sim_th, false)
         };
 
-        // Match existing or create new cluster
         if let Some(match_cluster) = match_cluster_opt {
             let new_template_tokens =
-                self.create_template(&content_tokens, &match_cluster.log_template_tokens);
+                self.create_template(content_tokens, &match_cluster.log_template_tokens);
 
-            // Update the cluster in the cache
             if let Some(cluster) = self.id_to_cluster.get(match_cluster.id) {
                 cluster.log_template_tokens = new_template_tokens.clone();
                 cluster.size += 1;
-
-                // Return a new copy of the updated cluster
                 LogCluster {
                     log_template_tokens: new_template_tokens,
                     id: match_cluster.id,
                     size: cluster.size,
                 }
             } else {
-                // This should not happen if the cache is working correctly
                 panic!("Cluster not found in cache after match");
             }
         } else {
             self.clusters_counter += 1;
             let cluster_id = self.clusters_counter;
-
+            // Only allocation on the new-cluster path (once per distinct pattern).
             let match_cluster = LogCluster {
-                log_template_tokens: content_tokens.clone(),
+                log_template_tokens: content_tokens.to_vec(),
                 id: cluster_id,
                 size: 1,
             };
-
             self.id_to_cluster.set(cluster_id, match_cluster);
-            self.add_seq_to_prefix_tree_helper(cluster_id, &content_tokens);
-
-            // Return a new copy of the cluster
+            self.add_seq_to_prefix_tree_helper(cluster_id, content_tokens);
             LogCluster {
-                log_template_tokens: content_tokens,
+                log_template_tokens: content_tokens.to_vec(),
                 id: cluster_id,
                 size: 1,
             }
@@ -307,27 +306,27 @@ impl Drain {
     // New cluster will not be created as a result of this call, nor any cluster modifications.
     pub fn match_log(&mut self, content: &str) -> Option<LogCluster> {
         let content_tokens = self.get_content_as_tokens(content);
-        let root_node = self.root_node.clone();
-        self.tree_search(&root_node, &content_tokens, 1.0, true)
+        self.tree_search_impl_borrowed(&content_tokens, 1.0, true)
     }
 
     fn get_content_as_tokens(&self, content: &str) -> Vec<String> {
-        let mut content = content.trim().to_string();
-        for extra_delimiter in &self.config.extra_delimiters {
-            content = content.replace(extra_delimiter, " ");
+        if self.config.extra_delimiters.is_empty() {
+            content.split_whitespace().map(|s| s.to_string()).collect()
+        } else {
+            let mut s = content.trim().to_string();
+            for extra_delimiter in &self.config.extra_delimiters {
+                s = s.replace(extra_delimiter, " ");
+            }
+            s.split_whitespace().map(|s| s.to_string()).collect()
         }
-        content.split_whitespace().map(|s| s.to_string()).collect()
     }
 
     pub fn extract_template_and_vars(&mut self, content: &str) -> ParsedLog {
+        // Tokenize once, borrow into train_with_tokens — no clone on the hot path.
         let content_tokens = self.get_content_as_tokens(content);
+        let cluster = self.train_with_tokens(&content_tokens);
 
-        // First train/match to get the cluster
-        let cluster = self.train(content);
-
-        // Extract variables by comparing the template with the original content
         let mut variables = Vec::new();
-
         for (i, token) in content_tokens.iter().enumerate() {
             if i < cluster.log_template_tokens.len()
                 && cluster.log_template_tokens[i] == self.config.param_string
@@ -353,75 +352,55 @@ impl Drain {
         sim_th: f64,
         include_params: bool,
     ) -> Option<LogCluster> {
+        self.tree_search_impl_borrowed(tokens, sim_th, include_params)
+    }
+
+    /// The actual tree traversal. Keying the first level by `usize` (token count)
+    /// avoids a heap String allocation on every call.
+    fn tree_search_impl_borrowed(
+        &mut self,
+        tokens: &[String],
+        sim_th: f64,
+        include_params: bool,
+    ) -> Option<LogCluster> {
         let token_count = tokens.len();
-        let token_count_str = token_count.to_string();
 
-        // Check if the first level exists
-        if !self
-            .root_node
-            .key_to_child_node
-            .contains_key(&token_count_str)
-        {
-            return None;
-        }
+        let first_layer_node = self.count_to_node.get(&token_count)?;
 
-        // Find the path to the correct node, collecting cluster IDs
-        let cluster_ids;
-        {
-            let cur_node = &self.root_node.key_to_child_node[&token_count_str];
+        let cluster_ids = if token_count == 0 {
+            if first_layer_node.cluster_ids.is_empty() {
+                return None;
+            }
+            first_layer_node.cluster_ids.clone()
+        } else {
+            let mut cur_node = first_layer_node;
+            let param_str = &self.config.param_string;
+            let max_depth = self.config.max_node_depth;
 
-            // handle case of empty log string
-            if token_count == 0 {
-                if !cur_node.cluster_ids.is_empty() {
-                    cluster_ids = cur_node.cluster_ids.clone();
+            for (cur_node_depth, token) in (1..).zip(tokens.iter()) {
+                if cur_node_depth >= max_depth || cur_node_depth == token_count {
+                    break;
+                }
+                if cur_node.key_to_child_node.contains_key(token) {
+                    cur_node = &cur_node.key_to_child_node[token];
+                } else if cur_node.key_to_child_node.contains_key(param_str) {
+                    cur_node = &cur_node.key_to_child_node[param_str];
                 } else {
                     return None;
                 }
-            } else {
-                // Navigate through the tree
-                let mut cur_node = cur_node;
-                let param_str = &self.config.param_string;
-                let max_depth = self.config.max_node_depth;
-
-                for (cur_node_depth, token) in (1..).zip(tokens.iter()) {
-                    // at max depth
-                    if cur_node_depth >= max_depth {
-                        break;
-                    }
-
-                    // this is last token
-                    if cur_node_depth == token_count {
-                        break;
-                    }
-
-                    if cur_node.key_to_child_node.contains_key(token) {
-                        cur_node = &cur_node.key_to_child_node[token];
-                    } else if cur_node.key_to_child_node.contains_key(param_str) {
-                        cur_node = &cur_node.key_to_child_node[param_str];
-                    } else {
-                        return None;
-                    }
-                }
-
-                // Store cluster IDs from the found node
-                cluster_ids = cur_node.cluster_ids.clone();
             }
-        }
+            cur_node.cluster_ids.clone()
+        };
 
-        // Now that we have the cluster IDs, find the best match
         self.fast_match(&cluster_ids, tokens, sim_th, include_params)
     }
 
-    // Helper method to update the prefix tree while avoiding borrow issues
     fn add_seq_to_prefix_tree_helper(&mut self, cluster_id: usize, tokens: &[String]) {
-        // Store values needed by add_seq_to_prefix_tree to avoid borrowing self completely
         let max_node_depth = self.config.max_node_depth;
         let param_string = self.config.param_string.clone();
         let max_children = self.config.max_children;
-
-        // Update the tree structure
         add_seq_to_prefix_tree_impl(
-            &mut self.root_node,
+            &mut self.count_to_node,
             cluster_id,
             tokens,
             max_node_depth,
@@ -431,65 +410,8 @@ impl Drain {
         );
     }
 
-    fn tree_search(
-        &mut self,
-        root_node: &Node,
-        tokens: &[String],
-        sim_th: f64,
-        include_params: bool,
-    ) -> Option<LogCluster> {
-        let token_count = tokens.len();
-        let token_count_str = token_count.to_string();
-
-        // at first level, children are grouped by token (word) count
-        if !root_node.key_to_child_node.contains_key(&token_count_str) {
-            return None;
-        }
-
-        let cur_node = &root_node.key_to_child_node[&token_count_str];
-
-        // handle case of empty log string - return the single cluster in that group
-        if token_count == 0 {
-            if !cur_node.cluster_ids.is_empty()
-                && let Some(cluster) = self.id_to_cluster.get(cur_node.cluster_ids[0])
-            {
-                return Some(LogCluster {
-                    log_template_tokens: cluster.log_template_tokens.clone(),
-                    id: cluster.id,
-                    size: cluster.size,
-                });
-            }
-            return None;
-        }
-
-        // find the leaf node for this log - a path of nodes matching the first N tokens (N=tree depth)
-        let mut cur_node = cur_node;
-        let param_str = &self.config.param_string;
-        let max_depth = self.config.max_node_depth;
-
-        for (cur_node_depth, token) in (1..).zip(tokens.iter()) {
-            // at max depth
-            if cur_node_depth >= max_depth {
-                break;
-            }
-
-            // this is last token
-            if cur_node_depth == token_count {
-                break;
-            }
-
-            if cur_node.key_to_child_node.contains_key(token) {
-                cur_node = &cur_node.key_to_child_node[token];
-            } else if cur_node.key_to_child_node.contains_key(param_str) {
-                cur_node = &cur_node.key_to_child_node[param_str];
-            } else {
-                return None;
-            }
-        }
-
-        // get best match among all clusters with same prefix, or None if no match is above sim_th
-        self.fast_match(&cur_node.cluster_ids, tokens, sim_th, include_params)
-    }
+    // match_log uses tree_search_impl_borrowed directly now; this method is kept
+    // only if external callers hold a Node reference (currently none).
 
     // fastMatch Find the best match for a log message (represented as tokens) versus a list of clusters
     fn fast_match(
@@ -582,9 +504,10 @@ fn get_seq_distance_static(
     (ret_val, param_count)
 }
 
-// Static implementation of add_seq_to_prefix_tree to avoid borrowing issues
+// Static implementation of add_seq_to_prefix_tree to avoid borrowing issues.
+// The first level is keyed by token count (usize) to avoid String allocation.
 fn add_seq_to_prefix_tree_impl(
-    root_node: &mut Node,
+    count_to_node: &mut HashMap<usize, Node>,
     cluster_id: usize,
     tokens: &[String],
     max_node_depth: usize,
@@ -593,18 +516,8 @@ fn add_seq_to_prefix_tree_impl(
     id_to_cluster: &mut LogClusterCache,
 ) {
     let token_count = tokens.len();
-    let token_count_str = token_count.to_string();
 
-    if !root_node.key_to_child_node.contains_key(&token_count_str) {
-        root_node
-            .key_to_child_node
-            .insert(token_count_str.clone(), Node::new());
-    }
-
-    let first_layer_node = root_node
-        .key_to_child_node
-        .get_mut(&token_count_str)
-        .unwrap();
+    let first_layer_node = count_to_node.entry(token_count).or_insert_with(Node::new);
 
     // handle case of empty log string
     if token_count == 0 {

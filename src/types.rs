@@ -10,18 +10,34 @@ pub enum OutputMode {
 }
 
 /// Variable type classification for extracted log variables
+#[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum VarType {
-    Integer,
-    Float,
-    Duration,
-    Timestamp,
-    IPv4,
-    IPv6,
-    UUID,
-    HexID,
-    Enum,
-    String,
+    Integer = 0,
+    Float = 1,
+    Duration = 2,
+    Timestamp = 3,
+    IPv4 = 4,
+    IPv6 = 5,
+    UUID = 6,
+    HexID = 7,
+    Enum = 8,
+    String = 9,
+}
+
+impl VarType {
+    pub const ALL: [VarType; 10] = [
+        VarType::Integer,
+        VarType::Float,
+        VarType::Duration,
+        VarType::Timestamp,
+        VarType::IPv4,
+        VarType::IPv6,
+        VarType::UUID,
+        VarType::HexID,
+        VarType::Enum,
+        VarType::String,
+    ];
 }
 
 impl fmt::Display for VarType {

@@ -126,19 +126,46 @@ pub fn run(args: Args) -> Result<()> {
         if bytes_read == 0 {
             break;
         }
-        let line = String::from_utf8_lossy(&raw_buf)
-            .trim_end_matches('\n')
-            .trim_end_matches('\r')
-            .to_string();
+        // Fast path: valid UTF-8 (essentially all syslog lines) avoids an allocation.
+        // The lossy path only triggers for malformed bytes.
+        let raw_str = match std::str::from_utf8(&raw_buf) {
+            Ok(s) => s.trim_end_matches('\r').trim_end_matches('\n'),
+            Err(_) => {
+                // Rare: invalid UTF-8 — fall back to lossy, store in a temp String.
+                // SAFETY: We need a longer-lived binding here.
+                let lossy = String::from_utf8_lossy(&raw_buf);
+                let trimmed = lossy.trim_end_matches('\r').trim_end_matches('\n');
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let line = trimmed.to_string();
+                let ts_match = extract_timestamp(&line);
+                let stripped = match &ts_match {
+                    Some(ts) => strip_timestamp(&line, ts),
+                    None => line.clone(),
+                };
+                let parsed = pipeline.process_line(&stripped);
+                store.accumulate(
+                    parsed.pattern_id,
+                    &parsed.display_template,
+                    &parsed.variables,
+                    ts_match.map(|ts| ts.datetime),
+                    &line,
+                    line_number,
+                );
+                continue;
+            }
+        };
+        let line = raw_str;
         if line.is_empty() {
             continue;
         }
         line_number += 1;
 
-        let ts_match = extract_timestamp(&line);
+        let ts_match = extract_timestamp(line);
         let stripped = match &ts_match {
-            Some(ts) => strip_timestamp(&line, ts),
-            None => line.clone(),
+            Some(ts) => strip_timestamp(line, ts),
+            None => line.to_string(),
         };
 
         let parsed = pipeline.process_line(&stripped);
@@ -148,7 +175,7 @@ pub fn run(args: Args) -> Result<()> {
             &parsed.display_template,
             &parsed.variables,
             ts_match.map(|ts| ts.datetime),
-            &line,
+            line,
             line_number,
         );
     }

@@ -28,9 +28,21 @@ static RE_EPOCH: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b(1[0-9]{9}(\d{3})?)\b
 
 /// Extract the first timestamp found in a log line, returning the datetime and byte range.
 pub fn extract_timestamp(line: &str) -> Option<TimestampMatch> {
+    // Fast path: Timestamps almost always appear within the first 64 bytes.
+    // Searching the prefix first bounds regex DFA/NFA state transitions.
+    if line.len() > 64 {
+        let prefix_len = line.floor_char_boundary(64);
+        if let Some(m) = extract_timestamp_in_str(&line[..prefix_len]) {
+            return Some(m);
+        }
+    }
+    extract_timestamp_in_str(line)
+}
+
+fn extract_timestamp_in_str(slice: &str) -> Option<TimestampMatch> {
     // Apache bracket format: [Thu Jun 09 06:07:04 2005]
     // Must be before syslog since syslog would partially match the inner part
-    if let Some(m) = RE_APACHE_BRACKET.find(line)
+    if let Some(m) = RE_APACHE_BRACKET.find(slice)
         && let Some(dt) = parse_apache_bracket(m.as_str())
     {
         return Some(TimestampMatch {
@@ -41,7 +53,7 @@ pub fn extract_timestamp(line: &str) -> Option<TimestampMatch> {
     }
 
     // ISO8601 / RFC3339
-    if let Some(m) = RE_ISO8601.find(line)
+    if let Some(m) = RE_ISO8601.find(slice)
         && let Some(dt) = parse_iso8601(m.as_str())
     {
         return Some(TimestampMatch {
@@ -52,7 +64,7 @@ pub fn extract_timestamp(line: &str) -> Option<TimestampMatch> {
     }
 
     // Common log format: 15/Jan/2024:14:22:01 +0000
-    if let Some(m) = RE_COMMON_LOG.find(line)
+    if let Some(m) = RE_COMMON_LOG.find(slice)
         && let Some(dt) = parse_common_log(m.as_str())
     {
         return Some(TimestampMatch {
@@ -63,7 +75,7 @@ pub fn extract_timestamp(line: &str) -> Option<TimestampMatch> {
     }
 
     // Syslog: Jan 15 14:22:01
-    if let Some(m) = RE_SYSLOG.find(line)
+    if let Some(m) = RE_SYSLOG.find(slice)
         && let Some(dt) = parse_syslog(m.as_str())
     {
         return Some(TimestampMatch {
@@ -74,7 +86,7 @@ pub fn extract_timestamp(line: &str) -> Option<TimestampMatch> {
     }
 
     // Epoch seconds (10 digits) or millis (13 digits)
-    if let Some(caps) = RE_EPOCH.captures(line)
+    if let Some(caps) = RE_EPOCH.captures(slice)
         && let Some(m) = caps.get(1)
         && let Some(dt) = parse_epoch(m.as_str())
     {
