@@ -45,6 +45,19 @@ impl<T> BoundedVec<T> {
     pub fn items(&self) -> &[T] {
         &self.items
     }
+
+    pub fn merge(&mut self, other: BoundedVec<T>) {
+        if self.capacity == 0 {
+            self.total_seen += other.total_seen;
+            return;
+        }
+        let other_items_len = other.items.len();
+        for item in other.items {
+            self.push(item);
+        }
+        self.total_seen = self.total_seen.max(self.items.len() as u64)
+            + other.total_seen.saturating_sub(other_items_len as u64);
+    }
 }
 
 // --- NumericStats ---
@@ -84,6 +97,21 @@ impl NumericStats {
             self.max = value;
         }
         self.sketch.add(value);
+    }
+
+    pub fn merge(&mut self, other: NumericStats) {
+        if other.count == 0 {
+            return;
+        }
+        if self.count == 0 {
+            *self = other;
+            return;
+        }
+        self.count += other.count;
+        self.sum += other.sum;
+        self.min = self.min.min(other.min);
+        self.max = self.max.max(other.max);
+        let _ = self.sketch.merge(&other.sketch);
     }
 
     pub fn mean(&self) -> f64 {
@@ -148,6 +176,54 @@ impl CategoricalStats {
                     hll.insert(key);
                 }
                 self.hll = Some(hll);
+            }
+        }
+    }
+
+    pub fn merge(&mut self, other: CategoricalStats) {
+        self.total_count += other.total_count;
+
+        if self.capped || other.capped {
+            self.capped = true;
+            let mut hll = self.hll.take().unwrap_or_else(|| {
+                let mut h =
+                    HyperLogLogPlus::new(16, RandomState::new()).expect("HLL creation failed");
+                for key in self.exact_counts.keys() {
+                    h.insert(key);
+                }
+                h
+            });
+
+            if let Some(other_hll) = other.hll {
+                hll.merge(&other_hll).ok();
+            } else {
+                for key in other.exact_counts.keys() {
+                    hll.insert(key);
+                }
+            }
+            self.hll = Some(hll);
+
+            for (k, v) in other.exact_counts {
+                if let Some(cnt) = self.exact_counts.get_mut(&k) {
+                    *cnt += v;
+                } else if self.exact_counts.len() < CARDINALITY_CAP {
+                    self.exact_counts.insert(k, v);
+                }
+            }
+        } else {
+            for (k, v) in other.exact_counts {
+                *self.exact_counts.entry(k).or_insert(0) += v;
+            }
+            if self.exact_counts.len() > CARDINALITY_CAP {
+                self.capped = true;
+                let mut hll =
+                    HyperLogLogPlus::new(16, RandomState::new()).expect("HLL creation failed");
+                for key in self.exact_counts.keys() {
+                    hll.insert(key);
+                }
+                self.hll = Some(hll);
+            } else {
+                self.cached_unique = self.exact_counts.len() as u64;
             }
         }
     }
@@ -244,6 +320,20 @@ impl VarSlotStats {
         self.check_enum_reclassify();
     }
 
+    pub fn merge(&mut self, other: VarSlotStats) {
+        for (i, &votes) in other.type_votes.iter().enumerate() {
+            self.type_votes[i] += votes;
+        }
+        self.categorical.merge(other.categorical);
+        if let Some(other_num) = other.numeric {
+            if let Some(ref mut num) = self.numeric {
+                num.merge(other_num);
+            } else {
+                self.numeric = Some(other_num);
+            }
+        }
+    }
+
     /// Check if this slot should be reclassified as Enum
     /// (pattern >= 50 occurrences, <= 20 unique values, top 3 cover >= 80%)
     pub fn check_enum_reclassify(&mut self) {
@@ -315,6 +405,40 @@ impl PatternStats {
             example_lines: BoundedVec::new(context_lines),
         }
     }
+
+    pub fn merge(&mut self, other: PatternStats) {
+        self.count += other.count;
+        if self.first_seen_line == 0
+            || (other.first_seen_line > 0 && other.first_seen_line < self.first_seen_line)
+        {
+            self.first_seen_line = other.first_seen_line;
+        }
+        self.last_seen_line = self.last_seen_line.max(other.last_seen_line);
+
+        match (self.first_ts, other.first_ts) {
+            (None, Some(ts)) => self.first_ts = Some(ts),
+            (Some(t1), Some(t2)) if t2 < t1 => self.first_ts = Some(t2),
+            _ => {}
+        }
+        match (self.last_ts, other.last_ts) {
+            (None, Some(ts)) => self.last_ts = Some(ts),
+            (Some(t1), Some(t2)) if t2 > t1 => self.last_ts = Some(t2),
+            _ => {}
+        }
+
+        for (minute, count) in other.time_buckets {
+            *self.time_buckets.entry(minute).or_insert(0) += count;
+        }
+
+        while self.variables.len() < other.variables.len() {
+            self.variables.push(VarSlotStats::new(self.variables.len()));
+        }
+        for (i, var) in other.variables.into_iter().enumerate() {
+            self.variables[i].merge(var);
+        }
+
+        self.example_lines.merge(other.example_lines);
+    }
 }
 
 // --- PatternStore ---
@@ -335,6 +459,41 @@ impl PatternStore {
             global_first_ts: None,
             global_last_ts: None,
             context_lines,
+        }
+    }
+
+    pub fn merge(&mut self, other: PatternStore) {
+        self.global_line_count += other.global_line_count;
+        match (self.global_first_ts, other.global_first_ts) {
+            (None, Some(ts)) => self.global_first_ts = Some(ts),
+            (Some(t1), Some(t2)) if t2 < t1 => self.global_first_ts = Some(t2),
+            _ => {}
+        }
+        match (self.global_last_ts, other.global_last_ts) {
+            (None, Some(ts)) => self.global_last_ts = Some(ts),
+            (Some(t1), Some(t2)) if t2 > t1 => self.global_last_ts = Some(t2),
+            _ => {}
+        }
+
+        let mut template_to_id: HashMap<String, PatternID> = self
+            .patterns
+            .iter()
+            .map(|(&id, s)| (s.template.clone(), id))
+            .collect();
+
+        for (_, other_stats) in other.patterns {
+            if let Some(&existing_id) = template_to_id.get(&other_stats.template) {
+                self.patterns
+                    .get_mut(&existing_id)
+                    .unwrap()
+                    .merge(other_stats);
+            } else {
+                let next_id = self.patterns.keys().max().copied().unwrap_or(0) + 1;
+                template_to_id.insert(other_stats.template.clone(), next_id);
+                let mut new_stats = other_stats;
+                new_stats.pattern_id = next_id;
+                self.patterns.insert(next_id, new_stats);
+            }
         }
     }
 
@@ -585,5 +744,84 @@ mod tests {
         bounded.push("line2".to_string());
         assert_eq!(bounded.items().len(), 0);
         assert_eq!(bounded.total_seen, 2);
+    }
+
+    #[test]
+    fn test_pattern_store_merge_equivalence() {
+        let mut single_store = PatternStore::new(2);
+        let mut store_a = PatternStore::new(2);
+        let mut store_b = PatternStore::new(2);
+
+        let var1 = TypedVariable {
+            raw: "42".to_string(),
+            var_type: VarType::Integer,
+        };
+        let var2 = TypedVariable {
+            raw: "100".to_string(),
+            var_type: VarType::Integer,
+        };
+
+        // Single store processes 2 items
+        single_store.accumulate(
+            1,
+            "Request id <*>",
+            std::slice::from_ref(&var1),
+            None,
+            "Request id 42",
+            1,
+        );
+        single_store.accumulate(
+            1,
+            "Request id <*>",
+            std::slice::from_ref(&var2),
+            None,
+            "Request id 100",
+            2,
+        );
+
+        // Store A processes item 1, Store B processes item 2
+        store_a.accumulate(
+            1,
+            "Request id <*>",
+            std::slice::from_ref(&var1),
+            None,
+            "Request id 42",
+            1,
+        );
+        store_b.accumulate(
+            2, // different local ID
+            "Request id <*>",
+            std::slice::from_ref(&var2),
+            None,
+            "Request id 100",
+            2,
+        );
+
+        // Merge store B into store A
+        store_a.merge(store_b);
+
+        single_store.finalize();
+        store_a.finalize();
+
+        assert_eq!(single_store.global_line_count, store_a.global_line_count);
+        assert_eq!(single_store.patterns.len(), store_a.patterns.len());
+
+        let single_pat = single_store.patterns.values().next().unwrap();
+        let merged_pat = store_a.patterns.values().next().unwrap();
+
+        assert_eq!(single_pat.count, merged_pat.count);
+        assert_eq!(single_pat.template, merged_pat.template);
+        assert_eq!(
+            single_pat.variables[0].var_type,
+            merged_pat.variables[0].var_type
+        );
+        assert_eq!(
+            single_pat.variables[0].numeric.as_ref().unwrap().count,
+            merged_pat.variables[0].numeric.as_ref().unwrap().count
+        );
+        assert_eq!(
+            single_pat.variables[0].numeric.as_ref().unwrap().sum,
+            merged_pat.variables[0].numeric.as_ref().unwrap().sum
+        );
     }
 }

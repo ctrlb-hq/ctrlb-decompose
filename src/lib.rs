@@ -10,6 +10,9 @@ pub mod types;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
+#[cfg(feature = "cli")]
+pub mod parallel;
+
 use std::collections::HashMap;
 
 use crate::anomaly::detect_anomalies;
@@ -30,8 +33,6 @@ use crate::types::OutputMode;
 use anyhow::Result;
 #[cfg(feature = "cli")]
 use clap::Parser;
-#[cfg(feature = "cli")]
-use std::fs::File;
 #[cfg(feature = "cli")]
 use std::io::{self, BufRead, BufReader};
 
@@ -108,77 +109,86 @@ impl Args {
 
 #[cfg(feature = "cli")]
 pub fn run(args: Args) -> Result<()> {
-    let mut reader: Box<dyn BufRead> = match args.file.as_deref() {
-        None | Some("-") => Box::new(BufReader::new(io::stdin())),
-        Some(path) => Box::new(BufReader::new(File::open(path)?)),
-    };
-
     let opts = args.to_format_options();
 
-    let mut pipeline = ClpDrainPipeline::new(Config::default());
-    let mut store = PatternStore::new(opts.context);
-    let mut line_number: u64 = 0;
+    let analysis = match args.file.as_deref() {
+        Some(path) if path != "-" => parallel::process_file_parallel(path, &opts)?,
+        _ => {
+            let mut reader = BufReader::new(io::stdin());
+            let mut pipeline = ClpDrainPipeline::new(Config::default());
+            let mut store = PatternStore::new(opts.context);
+            let mut line_number: u64 = 0;
 
-    let mut raw_buf = Vec::new();
-    loop {
-        raw_buf.clear();
-        let bytes_read = reader.read_until(b'\n', &mut raw_buf)?;
-        if bytes_read == 0 {
-            break;
-        }
-        // Fast path: valid UTF-8 (essentially all syslog lines) avoids an allocation.
-        // The lossy path only triggers for malformed bytes.
-        let raw_str = match std::str::from_utf8(&raw_buf) {
-            Ok(s) => s.trim_end_matches('\r').trim_end_matches('\n'),
-            Err(_) => {
-                // Rare: invalid UTF-8 — fall back to lossy, store in a temp String.
-                // SAFETY: We need a longer-lived binding here.
-                let lossy = String::from_utf8_lossy(&raw_buf);
-                let trimmed = lossy.trim_end_matches('\r').trim_end_matches('\n');
-                if trimmed.is_empty() {
+            let mut raw_buf = Vec::new();
+            loop {
+                raw_buf.clear();
+                let bytes_read = reader.read_until(b'\n', &mut raw_buf)?;
+                if bytes_read == 0 {
+                    break;
+                }
+                // Fast path: valid UTF-8 (essentially all syslog lines) avoids an allocation.
+                // The lossy path only triggers for malformed bytes.
+                let raw_str = match std::str::from_utf8(&raw_buf) {
+                    Ok(s) => s.trim_end_matches('\r').trim_end_matches('\n'),
+                    Err(_) => {
+                        // Rare: invalid UTF-8 — fall back to lossy, store in a temp String.
+                        // SAFETY: We need a longer-lived binding here.
+                        let lossy = String::from_utf8_lossy(&raw_buf);
+                        let trimmed = lossy.trim_end_matches('\r').trim_end_matches('\n');
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let line = trimmed.to_string();
+                        let ts_match = extract_timestamp(&line);
+                        let stripped = match &ts_match {
+                            Some(ts) => strip_timestamp(&line, ts),
+                            None => line.clone(),
+                        };
+                        let parsed = pipeline.process_line(&stripped);
+                        store.accumulate(
+                            parsed.pattern_id,
+                            &parsed.display_template,
+                            &parsed.variables,
+                            ts_match.map(|ts| ts.datetime),
+                            &line,
+                            line_number,
+                        );
+                        continue;
+                    }
+                };
+                let line = raw_str;
+                if line.is_empty() {
                     continue;
                 }
-                let line = trimmed.to_string();
-                let ts_match = extract_timestamp(&line);
+                line_number += 1;
+
+                let ts_match = extract_timestamp(line);
                 let stripped = match &ts_match {
-                    Some(ts) => strip_timestamp(&line, ts),
-                    None => line.clone(),
+                    Some(ts) => strip_timestamp(line, ts),
+                    None => line.to_string(),
                 };
+
                 let parsed = pipeline.process_line(&stripped);
+
                 store.accumulate(
                     parsed.pattern_id,
                     &parsed.display_template,
                     &parsed.variables,
                     ts_match.map(|ts| ts.datetime),
-                    &line,
+                    line,
                     line_number,
                 );
-                continue;
             }
-        };
-        let line = raw_str;
-        if line.is_empty() {
-            continue;
+
+            store.finalize();
+            let anomalies = detect_anomalies(&store);
+            let scores = compute_scores(&store, &anomalies);
+            AnalysisOutput { store, scores }
         }
-        line_number += 1;
+    };
 
-        let ts_match = extract_timestamp(line);
-        let stripped = match &ts_match {
-            Some(ts) => strip_timestamp(line, ts),
-            None => line.to_string(),
-        };
-
-        let parsed = pipeline.process_line(&stripped);
-
-        store.accumulate(
-            parsed.pattern_id,
-            &parsed.display_template,
-            &parsed.variables,
-            ts_match.map(|ts| ts.datetime),
-            line,
-            line_number,
-        );
-    }
+    let store = &analysis.store;
+    let scores = &analysis.scores;
 
     if !args.quiet {
         eprintln!(
@@ -188,12 +198,7 @@ pub fn run(args: Args) -> Result<()> {
         );
     }
 
-    store.finalize();
-
-    let anomalies = detect_anomalies(&store);
-    let scores = compute_scores(&store, &anomalies);
-
-    let output = format_output(&store, &opts, &scores);
+    let output = format_output(store, &opts, scores);
     print!("{}", output);
 
     if !args.quiet {
