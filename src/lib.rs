@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use crate::anomaly::detect_anomalies;
 use crate::extraction::drain3::Config;
 use crate::extraction::pipeline::ClpDrainPipeline;
-use crate::scoring::{compute_scores, PatternScore};
+use crate::scoring::{PatternScore, compute_scores};
 use crate::stats::PatternStore;
 use crate::timestamp::{extract_timestamp, strip_timestamp};
 use crate::types::{FormatOptions, PatternID};
@@ -23,17 +23,17 @@ use crate::types::{FormatOptions, PatternID};
 // ── CLI-only imports and types ──────────────────────────────────────────
 
 #[cfg(feature = "cli")]
-use std::fs::File;
+use crate::format::format_output;
 #[cfg(feature = "cli")]
-use std::io::{self, BufRead, BufReader};
+use crate::types::OutputMode;
 #[cfg(feature = "cli")]
 use anyhow::Result;
 #[cfg(feature = "cli")]
 use clap::Parser;
 #[cfg(feature = "cli")]
-use crate::format::format_output;
+use std::fs::File;
 #[cfg(feature = "cli")]
-use crate::types::OutputMode;
+use std::io::{self, BufRead, BufReader};
 
 #[cfg(feature = "cli")]
 #[derive(Parser, Debug)]
@@ -94,7 +94,11 @@ impl Args {
     pub fn to_format_options(&self) -> FormatOptions {
         FormatOptions {
             top: self.top,
-            context: if self.llm && self.context == 0 { 2 } else { self.context },
+            context: if self.llm && self.context == 0 {
+                2
+            } else {
+                self.context
+            },
             no_color: self.no_color,
             no_banner: self.no_banner,
             output_mode: self.output_mode(),
@@ -122,7 +126,10 @@ pub fn run(args: Args) -> Result<()> {
         if bytes_read == 0 {
             break;
         }
-        let line = String::from_utf8_lossy(&raw_buf).trim_end_matches('\n').trim_end_matches('\r').to_string();
+        let line = String::from_utf8_lossy(&raw_buf)
+            .trim_end_matches('\n')
+            .trim_end_matches('\r')
+            .to_string();
         if line.is_empty() {
             continue;
         }
@@ -163,9 +170,7 @@ pub fn run(args: Args) -> Result<()> {
     print!("{}", output);
 
     if !args.quiet {
-        eprintln!(
-            "\nPowered by CtrlB \u{00b7} Search 5TB of logs in 614ms \u{2192} ctrlb.ai"
-        );
+        eprintln!("\nPowered by CtrlB \u{00b7} Search 5TB of logs in 614ms \u{2192} ctrlb.ai");
     }
 
     Ok(())

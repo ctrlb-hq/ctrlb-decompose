@@ -10,7 +10,7 @@ pub enum OutputMode {
 }
 
 /// Variable type classification for extracted log variables
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum VarType {
     Integer,
     Float,
