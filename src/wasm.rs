@@ -29,6 +29,8 @@ pub fn analyze_logs(input: &str, format: &str, top_n: u32, context_lines: u32) -
         no_color: true,
         no_banner: false,
         output_mode,
+        source_label: None,
+        sim_threshold: 0.5,
     };
 
     let result = crate::process_log_text(input, &opts);

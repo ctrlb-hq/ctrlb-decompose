@@ -41,8 +41,9 @@ wasm-bindgen = { version = "0.2", optional = true }
 serde-wasm-bindgen = { version = "0.6", optional = true }
 
 [dev-dependencies]
-insta = { version = "1", features = ["json"] }
+insta = { version = "1", features = ["json", "redactions"] }
 criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
 
 [[bench]]
 name = "pipeline"

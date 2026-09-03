@@ -1,4 +1,3 @@
-use std::mem;
 
 /// Variable placeholder types
 #[repr(u8)]
@@ -38,11 +37,11 @@ impl EncodedVariable for FourByteEncodedVariable {
     const MAX_REPRESENTABLE_DIGITS: usize = 8;
 
     fn from_bits(bits: u32) -> Self {
-        unsafe { mem::transmute(bits) }
+        unsafe { u32::cast_signed(bits) }
     }
 
     fn to_bits(self) -> u32 {
-        unsafe { mem::transmute(self) }
+        unsafe { i32::cast_unsigned(self) }
     }
 
     fn as_u64(digits: Self::DigitsType) -> u64 {
@@ -68,11 +67,11 @@ impl EncodedVariable for EightByteEncodedVariable {
     const MAX_REPRESENTABLE_DIGITS: usize = 16;
 
     fn from_bits(bits: u64) -> Self {
-        unsafe { mem::transmute(bits) }
+        unsafe { u64::cast_signed(bits) }
     }
 
     fn to_bits(self) -> u64 {
-        unsafe { mem::transmute(self) }
+        unsafe { i64::cast_unsigned(self) }
     }
 
     fn as_u64(digits: Self::DigitsType) -> u64 {
@@ -92,16 +91,37 @@ impl EncodedVariable for EightByteEncodedVariable {
     }
 }
 
-/// Function to check if a character is a delimiter
+/// 256-byte lookup table: true = delimiter, false = non-delimiter.
+/// Non-delimiters are: '+', '-', '.', '0'-'9', 'A'-'Z', '_', 'a'-'z'
+static DELIM_TABLE: [bool; 256] = {
+    let mut table = [true; 256];
+    table[b'+' as usize] = false;
+    table[b'-' as usize] = false;
+    table[b'.' as usize] = false;
+    table[b'_' as usize] = false;
+    let mut i = b'0';
+    while i <= b'9' {
+        table[i as usize] = false;
+        i += 1;
+    }
+    i = b'A';
+    while i <= b'Z' {
+        table[i as usize] = false;
+        i += 1;
+    }
+    i = b'a';
+    while i <= b'z' {
+        table[i as usize] = false;
+        i += 1;
+    }
+    table
+};
+
+/// Function to check if a character is a delimiter (lookup table, branch-free)
+#[inline(always)]
 fn is_delim(c: char) -> bool {
-    // Everything except "+-.0-9A-Z\_a-z" is a delimiter
-    !(c == '+'
-        || c == '-'
-        || c == '.'
-        || c.is_ascii_digit()
-        || c.is_ascii_uppercase()
-        || c == '_'
-        || c.is_ascii_lowercase())
+    let b = c as u32;
+    if b < 256 { DELIM_TABLE[b as usize] } else { true }
 }
 
 /// Function to check if a character is a variable placeholder
@@ -692,9 +712,9 @@ pub fn decode_float_properties<T: EncodedVariable>(
 /// Function to decode an integer variable
 fn decode_integer_var<T: EncodedVariable>(encoded_var: T) -> String {
     if std::mem::size_of::<T>() == 8 {
-        T::as_u64(encoded_var.to_bits()).to_string()
+        (T::as_u64(encoded_var.to_bits()) as i64).to_string()
     } else {
-        T::as_u32(encoded_var.to_bits()).to_string()
+        (T::as_u32(encoded_var.to_bits()) as i32).to_string()
     }
 }
 
@@ -1001,6 +1021,247 @@ mod tests {
                 logtype, encoded_vars, dictionary_vars
             );
             assert_eq!(decoded_message, log_message11); // The decoded message should match the original
+        }
+    }
+
+    // ── Edge-case unit tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_encode_float_boundary_length() {
+        // 18-char float should succeed
+        let eighteen = "12345678901234.567"; // 18 chars
+        assert_eq!(eighteen.len(), 18);
+        assert!(encode_float_string::<EightByteEncodedVariable>(eighteen).is_some());
+
+        // 19-char float should fail
+        let nineteen = "123456789012345.678"; // 19 chars
+        assert_eq!(nineteen.len(), 19);
+        assert!(encode_float_string::<EightByteEncodedVariable>(nineteen).is_none());
+    }
+
+    #[test]
+    fn test_encode_float_edge_cases() {
+        // Empty string
+        assert!(encode_float_string::<EightByteEncodedVariable>("").is_none());
+
+        // No decimal point
+        assert!(encode_float_string::<EightByteEncodedVariable>("123").is_none());
+
+        // Decimal at end (e.g. "123.") — no digits after decimal, decimal_point_pos would be 0
+        assert!(encode_float_string::<EightByteEncodedVariable>("123.").is_none());
+
+        // Just a dot
+        assert!(encode_float_string::<EightByteEncodedVariable>(".").is_none());
+
+        // Negative dot
+        assert!(encode_float_string::<EightByteEncodedVariable>("-.").is_none());
+
+        // Negative sign only
+        assert!(encode_float_string::<EightByteEncodedVariable>("-").is_none());
+
+        // Valid cases
+        assert!(encode_float_string::<EightByteEncodedVariable>("0.0").is_some());
+        assert!(encode_float_string::<EightByteEncodedVariable>("0.5").is_some());
+        assert!(encode_float_string::<EightByteEncodedVariable>("-3.14").is_some());
+    }
+
+    #[test]
+    fn test_encode_float_roundtrip_values() {
+        let cases = ["0.0", "1.5", "-3.14", "0.001", "99999.99", "-0.5"];
+        for input in &cases {
+            let encoded = encode_float_string::<EightByteEncodedVariable>(input)
+                .unwrap_or_else(|| panic!("encode_float_string failed for {}", input));
+            let decoded = decode_float_var::<EightByteEncodedVariable>(encoded);
+            assert_eq!(
+                &decoded, input,
+                "Float roundtrip mismatch for '{}'",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_encode_integer_edge_cases() {
+        // Zero-padded values rejected
+        assert!(
+            encode_integer_string::<EightByteEncodedVariable>("007").is_none(),
+            "007 should be rejected (zero-padded)"
+        );
+        assert!(
+            encode_integer_string::<EightByteEncodedVariable>("00").is_none(),
+            "00 should be rejected (zero-padded)"
+        );
+
+        // "-0" rejected (starts with '-' but next char is '0')
+        assert!(
+            encode_integer_string::<EightByteEncodedVariable>("-0").is_none(),
+            "-0 should be rejected"
+        );
+
+        // Empty string rejected
+        assert!(
+            encode_integer_string::<EightByteEncodedVariable>("").is_none(),
+            "empty should be rejected"
+        );
+
+        // "0" works
+        assert!(
+            encode_integer_string::<EightByteEncodedVariable>("0").is_some(),
+            "0 should succeed"
+        );
+
+        // i64::MAX works
+        let max_str = i64::MAX.to_string();
+        assert!(
+            encode_integer_string::<EightByteEncodedVariable>(&max_str).is_some(),
+            "i64::MAX should succeed for EightByte"
+        );
+
+        // i64::MIN works (starts with '-' followed by non-zero)
+        let min_str = i64::MIN.to_string();
+        assert!(
+            encode_integer_string::<EightByteEncodedVariable>(&min_str).is_some(),
+            "i64::MIN should succeed for EightByte"
+        );
+
+        // Overflow rejected (i64::MAX + 1 as string)
+        let overflow = "9999999999999999999999";
+        assert!(
+            encode_integer_string::<EightByteEncodedVariable>(overflow).is_none(),
+            "overflow should be rejected"
+        );
+
+        // FourByte i32 range check: value in i32 range succeeds
+        assert!(
+            encode_integer_string::<FourByteEncodedVariable>("42").is_some(),
+            "42 should succeed for FourByte"
+        );
+
+        // FourByte: value outside i32 range rejected
+        let above_i32 = (i32::MAX as i64 + 1).to_string();
+        assert!(
+            encode_integer_string::<FourByteEncodedVariable>(&above_i32).is_none(),
+            "value above i32::MAX should be rejected for FourByte"
+        );
+
+        let below_i32 = (i32::MIN as i64 - 1).to_string();
+        assert!(
+            encode_integer_string::<FourByteEncodedVariable>(&below_i32).is_none(),
+            "value below i32::MIN should be rejected for FourByte"
+        );
+    }
+
+    #[test]
+    fn test_encode_integer_roundtrip_values() {
+        // Roundtrip test: encode then decode through encode_message/decode_message
+        // to get proper signed handling. Direct encode/decode treats values as unsigned.
+        let cases = ["0", "1", "42", "999"];
+        for input in &cases {
+            let msg = format!(" {} ", input); // wrap in delimiters so it is detected as a variable
+            let (logtype, encoded_vars, dictionary_vars) =
+                encode_message::<EightByteEncodedVariable>(&msg);
+            let decoded = decode_message::<EightByteEncodedVariable>(
+                &logtype,
+                &encoded_vars,
+                &dictionary_vars,
+            );
+            assert_eq!(
+                decoded, msg,
+                "Integer roundtrip mismatch for '{}'",
+                input
+            );
+        }
+
+        // Also verify i64::MAX roundtrips through encode_message/decode_message
+        let max_msg = format!(" {} ", i64::MAX);
+        let (logtype, encoded_vars, dictionary_vars) =
+            encode_message::<EightByteEncodedVariable>(&max_msg);
+        let decoded = decode_message::<EightByteEncodedVariable>(
+            &logtype,
+            &encoded_vars,
+            &dictionary_vars,
+        );
+        assert_eq!(decoded, max_msg, "i64::MAX roundtrip mismatch");
+    }
+
+    #[test]
+    fn test_four_byte_float_roundtrip() {
+        let cases = ["1.5", "-3.14", "0.0", "99.99"];
+        for input in &cases {
+            let encoded = encode_float_string::<FourByteEncodedVariable>(input)
+                .unwrap_or_else(|| panic!("encode_float_string<FourByte> failed for {}", input));
+            let decoded = decode_float_var::<FourByteEncodedVariable>(encoded);
+            assert_eq!(
+                &decoded, input,
+                "FourByte float roundtrip mismatch for '{}'",
+                input
+            );
+        }
+    }
+
+    // ── Proptest property tests ─────────────────────────────────────────
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn roundtrip_eight_byte(s in "[ -~]{0,500}") {
+                let (logtype, encoded_vars, dictionary_vars) =
+                    encode_message::<EightByteEncodedVariable>(&s);
+                let decoded = decode_message::<EightByteEncodedVariable>(
+                    &logtype,
+                    &encoded_vars,
+                    &dictionary_vars,
+                );
+                prop_assert_eq!(decoded, s);
+            }
+
+            #[test]
+            fn roundtrip_four_byte(s in "[ -~]{0,500}") {
+                let (logtype, encoded_vars, dictionary_vars) =
+                    encode_message::<FourByteEncodedVariable>(&s);
+                let decoded = decode_message::<FourByteEncodedVariable>(
+                    &logtype,
+                    &encoded_vars,
+                    &dictionary_vars,
+                );
+                prop_assert_eq!(decoded, s);
+            }
+
+            #[test]
+            fn roundtrip_with_unicode(s in ".{0,300}") {
+                let (logtype, encoded_vars, dictionary_vars) =
+                    encode_message::<EightByteEncodedVariable>(&s);
+                let decoded = decode_message::<EightByteEncodedVariable>(
+                    &logtype,
+                    &encoded_vars,
+                    &dictionary_vars,
+                );
+                prop_assert_eq!(decoded, s);
+            }
+
+            #[test]
+            fn get_bounds_no_panic(s in ".{0,1000}") {
+                let mut begin: usize = 0;
+                let mut end: usize = 0;
+                while let Some((b, e)) = get_bounds_of_next_var(&s, begin, end) {
+                    // Returned bounds must be valid char boundaries
+                    prop_assert!(s.is_char_boundary(b), "begin {} is not a char boundary", b);
+                    prop_assert!(s.is_char_boundary(e), "end {} is not a char boundary", e);
+                    prop_assert!(b < e, "begin {} must be less than end {}", b, e);
+                    begin = e;
+                    end = e;
+                }
+            }
+
+            #[test]
+            fn append_constant_no_panic(s in ".{0,500}") {
+                let mut logtype = String::new();
+                escape_and_append_const_to_logtype(&s, &mut logtype);
+                // Just assert no panic occurred — the function completed.
+            }
         }
     }
 }

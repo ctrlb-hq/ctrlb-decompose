@@ -1,0 +1,25 @@
+---
+source: tests/integration.rs
+expression: redacted
+---
+Pattern #1 [ERROR] (3 occurrences, 15.0%)
+  "<TS> ERROR [<*>] Timeout connecting to <*>:<*> after <*>"
+  Variables:
+    HexID:    [3 values redacted]
+    IPv4:    [3 values redacted]
+    Integer:  mean=5432, p50=5379, p99=5379, min=5432, max=5432
+    Duration: mean=5000, p50=4965, p99=4965, min=4998, max=5002
+
+Pattern #2 (14 occurrences, 70.0%)
+  "<TS> INFO [<*>] Request from <*> completed in <*> status=<*>"
+  Variables:
+    HexID:    [5 values redacted]
+    IPv4:    [5 values redacted]
+    Duration: mean=188, p50=41, p99=314, min=28, max=1847
+    Integer:  mean=243, p50=198, p99=498, min=200, max=503
+
+Pattern #3 [WARN] (3 occurrences, 15.0%)
+  "<TS> WARN [<*>] Connection pool exhausted, waiting <*>"
+  Variables:
+    HexID:    [3 values redacted]
+    Duration: mean=603, p50=228, p99=228, min=180, max=1400

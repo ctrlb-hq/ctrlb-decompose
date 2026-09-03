@@ -232,3 +232,144 @@ fn detect_error_pattern(pattern: &PatternStats) -> Option<Anomaly> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extraction::drain3::TypedVariable;
+    use crate::stats::PatternStore;
+    use crate::types::VarType;
+
+    /// Helper: create a PatternStore and accumulate `lines` under pattern_id=1
+    /// with the given template, no timestamps, no variables.
+    fn store_with_lines(template: &str, lines: &[&str]) -> PatternStore {
+        let mut store = PatternStore::new(2);
+        for (i, line) in lines.iter().enumerate() {
+            store.accumulate(1, template, &[], None, line, (i + 1) as u64);
+        }
+        store
+    }
+
+    #[test]
+    fn test_detect_error_pattern_matches() {
+        let lines: Vec<&str> = (0..5)
+            .map(|_| "ERROR: connection failed to 10.0.0.1")
+            .collect();
+        let store = store_with_lines("ERROR: connection failed to <*>", &lines);
+        let anomalies = detect_anomalies(&store);
+        assert!(
+            anomalies.iter().any(|af| af
+                .anomalies
+                .iter()
+                .any(|a| matches!(a, Anomaly::HighErrorRate { .. }))),
+            "expected HighErrorRate for template containing ERROR"
+        );
+    }
+
+    #[test]
+    fn test_detect_error_pattern_with_brackets() {
+        let lines: Vec<&str> = (0..5)
+            .map(|_| "[FATAL] process crashed")
+            .collect();
+        let store = store_with_lines("[FATAL] process crashed", &lines);
+        let anomalies = detect_anomalies(&store);
+        assert!(
+            anomalies.iter().any(|af| af
+                .anomalies
+                .iter()
+                .any(|a| matches!(a, Anomaly::HighErrorRate { .. }))),
+            "expected HighErrorRate for template containing [FATAL]"
+        );
+    }
+
+    #[test]
+    fn test_no_false_positive_error_in_payload() {
+        let lines: Vec<&str> = (0..5)
+            .map(|_| "INFO processing via error_handler module")
+            .collect();
+        let store =
+            store_with_lines("INFO processing via error_handler module", &lines);
+        let anomalies = detect_anomalies(&store);
+        assert!(
+            !anomalies.iter().any(|af| af
+                .anomalies
+                .iter()
+                .any(|a| matches!(a, Anomaly::HighErrorRate { .. }))),
+            "error_handler should NOT trigger HighErrorRate (compound word)"
+        );
+    }
+
+    #[test]
+    fn test_no_error_in_info_pattern() {
+        let lines: Vec<&str> = (0..5)
+            .map(|_| "INFO request completed successfully")
+            .collect();
+        let store =
+            store_with_lines("INFO request completed successfully", &lines);
+        let anomalies = detect_anomalies(&store);
+        assert!(
+            !anomalies.iter().any(|af| af
+                .anomalies
+                .iter()
+                .any(|a| matches!(a, Anomaly::HighErrorRate { .. }))),
+            "INFO-only template should not produce HighErrorRate"
+        );
+    }
+
+    #[test]
+    fn test_low_cardinality_detection() {
+        let mut store = PatternStore::new(2);
+        let values = ["alpha", "beta", "gamma"];
+        for i in 0..200 {
+            let val = values[i % 3];
+            let var = TypedVariable {
+                raw: val.to_string(),
+                var_type: VarType::String,
+            };
+            store.accumulate(
+                1,
+                "GET /api/<*>",
+                &[var],
+                None,
+                &format!("GET /api/{}", val),
+                (i + 1) as u64,
+            );
+        }
+        let anomalies = detect_anomalies(&store);
+        assert!(
+            anomalies.iter().any(|af| af
+                .anomalies
+                .iter()
+                .any(|a| matches!(a, Anomaly::LowCardinality { .. }))),
+            "200 lines with 3 unique values should trigger LowCardinality"
+        );
+    }
+
+    #[test]
+    fn test_anomaly_severity_ordering() {
+        let high_error = Anomaly::HighErrorRate {
+            description: "error-level log pattern".to_string(),
+        };
+        let low_card = Anomaly::LowCardinality {
+            var_slot: 0,
+            unique_count: 3,
+            description: "targets only 3 unique values".to_string(),
+        };
+        assert!(
+            high_error.severity() > low_card.severity(),
+            "HighErrorRate severity ({}) should be greater than LowCardinality severity ({})",
+            high_error.severity(),
+            low_card.severity()
+        );
+    }
+
+    #[test]
+    fn test_empty_store_no_anomalies() {
+        let store = PatternStore::new(2);
+        let anomalies = detect_anomalies(&store);
+        assert!(
+            anomalies.is_empty(),
+            "empty PatternStore should produce no anomalies"
+        );
+    }
+}

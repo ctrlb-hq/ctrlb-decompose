@@ -1,0 +1,35 @@
+This repository contains ctrlb-decompose, a CLI tool that compresses raw log lines into structural patterns with typed variables, quantile statistics, anomaly detection, and temporal correlations.
+
+## Log Analysis
+
+When working with log files (>100 lines), run ctrlb-decompose first to get a structural summary before reading raw logs:
+
+```bash
+./target/release/ctrlb-decompose <file> --llm --context 2 --quiet 2>/dev/null
+```
+
+This compresses thousands of log lines into a handful of actionable patterns with:
+- Error/warning patterns prioritized first
+- Typed variables (IPv4, UUID, Duration, HexID, Integer, Enum, etc.)
+- Quantile statistics (p50, p99, min, max) for numeric variables
+- Example raw lines for each pattern
+
+Key flags:
+- `--llm` — Token-efficient markdown output (default context=2, banner suppressed)
+- `--json` — Structured JSON output for programmatic use
+- `--source-label <name>` — Tag output with a source name (e.g., pod name)
+- `--sim-threshold <0.0-1.0>` — Tune clustering granularity (default 0.5, lower = fewer patterns)
+- `--top <N>` — Limit to top N patterns (default 20)
+- `--context <N>` — Example lines per pattern
+
+Works with stdin: `kubectl logs pod | ./target/release/ctrlb-decompose --llm`
+
+Workflow: decompose first, identify patterns of interest, then drill into the raw file with grep or higher --context.
+
+## Build
+
+```bash
+cargo build --release
+cargo test --locked
+cargo clippy
+```
