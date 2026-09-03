@@ -265,7 +265,7 @@ fn truncate_token(s: &str) -> String {
 /// base64 blobs, and long hex IDs that waste LLM context.
 fn truncate_long_tokens(line: &str) -> String {
     line.split_whitespace()
-        .map(|token| truncate_token(token))
+        .map(truncate_token)
         .collect::<Vec<_>>()
         .join(" ")
 }

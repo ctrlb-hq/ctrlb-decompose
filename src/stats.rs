@@ -57,6 +57,12 @@ pub struct NumericStats {
     sketch: DDSketch,
 }
 
+impl Default for NumericStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NumericStats {
     pub fn new() -> Self {
         NumericStats {
@@ -77,7 +83,7 @@ impl NumericStats {
         if value > self.max {
             self.max = value;
         }
-        let _ = self.sketch.add(value);
+        self.sketch.add(value);
     }
 
     pub fn mean(&self) -> f64 {
@@ -103,6 +109,12 @@ pub struct CategoricalStats {
     capped: bool,
 }
 
+impl Default for CategoricalStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CategoricalStats {
     pub fn new() -> Self {
         CategoricalStats {
@@ -124,7 +136,6 @@ impl CategoricalStats {
             }
             if let Some(ref mut hll) = self.hll {
                 hll.insert(&value.to_string());
-                self.cached_unique = hll.count().round() as u64;
             }
         } else {
             *self.exact_counts.entry(value.to_string()).or_insert(0) += 1;
@@ -136,9 +147,16 @@ impl CategoricalStats {
                 for key in self.exact_counts.keys() {
                     hll.insert(key);
                 }
-                self.cached_unique = hll.count().round() as u64;
                 self.hll = Some(hll);
             }
+        }
+    }
+
+    pub fn finalize(&mut self) {
+        if self.capped
+            && let Some(ref mut hll) = self.hll
+        {
+            self.cached_unique = hll.count().round() as u64;
         }
     }
 
@@ -153,7 +171,7 @@ impl CategoricalStats {
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.1));
         entries.truncate(k);
         entries
             .into_iter()
@@ -176,7 +194,7 @@ pub struct VarSlotStats {
     pub var_type: VarType,
     pub numeric: Option<NumericStats>,
     pub categorical: CategoricalStats,
-    type_votes: HashMap<VarType, u64>,
+    type_votes: [u64; 10],
 }
 
 impl VarSlotStats {
@@ -186,14 +204,13 @@ impl VarSlotStats {
             var_type: VarType::String,
             numeric: None,
             categorical: CategoricalStats::new(),
-            type_votes: HashMap::new(),
+            type_votes: [0; 10],
         }
     }
 
     pub fn update(&mut self, var: &TypedVariable) {
-        // Vote on type (majority wins)
-        *self.type_votes.entry(var.var_type).or_insert(0) += 1;
-        self.var_type = *self.type_votes.iter().max_by_key(|(_, v)| *v).unwrap().0;
+        // Fast vote recording into fixed array
+        self.type_votes[var.var_type as usize] += 1;
 
         // Always update categorical
         self.categorical.update(&var.raw);
@@ -208,6 +225,23 @@ impl VarSlotStats {
             }
             _ => {}
         }
+    }
+
+    pub fn finalize(&mut self) {
+        // Resolve type vote (majority wins, deterministic tie-breaking on enum order)
+        let mut max_votes = 0;
+        let mut best_type = self.var_type;
+        for &vt in &VarType::ALL {
+            let votes = self.type_votes[vt as usize];
+            if votes > max_votes || (votes == max_votes && max_votes > 0 && vt < best_type) {
+                max_votes = votes;
+                best_type = vt;
+            }
+        }
+        self.var_type = best_type;
+
+        self.categorical.finalize();
+        self.check_enum_reclassify();
     }
 
     /// Check if this slot should be reclassified as Enum
@@ -242,10 +276,10 @@ fn parse_numeric_value(raw: &str) -> Option<f64> {
         ("h", 3_600_000.0),
     ];
     for (suffix, multiplier) in suffixes {
-        if let Some(num_str) = raw.strip_suffix(suffix) {
-            if let Ok(v) = num_str.parse::<f64>() {
-                return Some(v * multiplier);
-            }
+        if let Some(num_str) = raw.strip_suffix(suffix)
+            && let Ok(v) = num_str.parse::<f64>()
+        {
+            return Some(v * multiplier);
         }
     }
     None
@@ -335,9 +369,10 @@ impl PatternStore {
             .entry(pattern_id)
             .or_insert_with(|| PatternStats::new(pattern_id, template.to_string(), ctx));
 
-        // Always update template to the latest from Drain3 — it evolves
-        // as more lines are seen (more positions become <*>)
-        stats.template = template.to_string();
+        // Update template only when it changes from Drain3
+        if stats.template != template {
+            stats.template = template.to_string();
+        }
 
         stats.count += 1;
         if stats.first_seen_line == 0 {
@@ -366,20 +401,24 @@ impl PatternStore {
         // Variable stats
         for (i, var) in variables.iter().enumerate() {
             while stats.variables.len() <= i {
-                stats.variables.push(VarSlotStats::new(stats.variables.len()));
+                stats
+                    .variables
+                    .push(VarSlotStats::new(stats.variables.len()));
             }
             stats.variables[i].update(var);
         }
 
-        // Example lines
-        stats.example_lines.push(raw_line.to_string());
+        // Example lines (only allocate string when context lines > 0)
+        if self.context_lines > 0 {
+            stats.example_lines.push(raw_line.to_string());
+        }
     }
 
-    /// Run post-accumulation fixups (enum reclassification, etc.)
+    /// Run post-accumulation fixups (finalize categorical HLL, enum reclassification, etc.)
     pub fn finalize(&mut self) {
         for stats in self.patterns.values_mut() {
             for var in &mut stats.variables {
-                var.check_enum_reclassify();
+                var.finalize();
             }
         }
     }
@@ -387,7 +426,7 @@ impl PatternStore {
     /// Patterns sorted by count descending
     pub fn sorted_patterns(&self) -> Vec<&PatternStats> {
         let mut patterns: Vec<_> = self.patterns.values().collect();
-        patterns.sort_by(|a, b| b.count.cmp(&a.count));
+        patterns.sort_by_key(|a| std::cmp::Reverse(a.count));
         patterns
     }
 
@@ -423,5 +462,128 @@ impl PatternStore {
         } else {
             Vec::new()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_categorical_stats_high_cardinality_deferred_hll() {
+        let mut stats = CategoricalStats::new();
+
+        // Ingest 30,000 unique values (exceeds CARDINALITY_CAP of 10,000)
+        let total_unique = 30_000;
+        for i in 0..total_unique {
+            stats.update(&format!("val_{:06}", i));
+        }
+
+        assert_eq!(stats.total_count, total_unique as u64);
+        assert!(stats.capped);
+
+        // Before finalize, cached_unique represents the cap snapshot
+        // Finalize computes the true HLL estimate
+        stats.finalize();
+
+        let unique = stats.unique_count();
+        // HLL with p=16 has standard error ~1.04 / sqrt(2^16) ≈ 0.4%
+        let error_margin = (total_unique as f64 * 0.05) as u64;
+        assert!(
+            unique >= total_unique as u64 - error_margin
+                && unique <= total_unique as u64 + error_margin,
+            "Expected ~{}, got {}",
+            total_unique,
+            unique
+        );
+    }
+
+    #[test]
+    fn test_deterministic_type_voting_on_tie() {
+        let mut slot1 = VarSlotStats::new(0);
+        let mut slot2 = VarSlotStats::new(0);
+
+        // Cast 1 vote for Integer, 1 vote for Float
+        slot1.update(&TypedVariable {
+            raw: "100".to_string(),
+            var_type: VarType::Integer,
+        });
+        slot1.update(&TypedVariable {
+            raw: "100.5".to_string(),
+            var_type: VarType::Float,
+        });
+
+        // Inverse order in slot 2
+        slot2.update(&TypedVariable {
+            raw: "100.5".to_string(),
+            var_type: VarType::Float,
+        });
+        slot2.update(&TypedVariable {
+            raw: "100".to_string(),
+            var_type: VarType::Integer,
+        });
+
+        slot1.finalize();
+        slot2.finalize();
+
+        assert_eq!(slot1.var_type, slot2.var_type);
+        assert_eq!(slot1.var_type, VarType::Integer);
+    }
+
+    #[test]
+    fn test_numeric_stats_quantiles() {
+        let mut num = NumericStats::new();
+        for i in 1..=100 {
+            num.update(i as f64);
+        }
+
+        assert_eq!(num.count, 100);
+        assert_eq!(num.min, 1.0);
+        assert_eq!(num.max, 100.0);
+        assert_eq!(num.mean(), 50.5);
+
+        let p50 = num.quantile(0.50).unwrap();
+        assert!((p50 - 50.0).abs() <= 2.0);
+    }
+
+    #[test]
+    fn test_bounded_vec_reservoir_sampling() {
+        let mut bounded = BoundedVec::new(5);
+        for i in 0..100 {
+            bounded.push(i);
+        }
+
+        assert_eq!(bounded.items().len(), 5);
+        assert_eq!(bounded.total_seen, 100);
+    }
+
+    #[test]
+    fn test_var_slot_stats_finalize_type_voting() {
+        let mut slot = VarSlotStats::new(0);
+        // Cast 2 votes for Integer, 1 for String
+        slot.update(&TypedVariable {
+            raw: "100".to_string(),
+            var_type: VarType::Integer,
+        });
+        slot.update(&TypedVariable {
+            raw: "200".to_string(),
+            var_type: VarType::Integer,
+        });
+        slot.update(&TypedVariable {
+            raw: "text".to_string(),
+            var_type: VarType::String,
+        });
+
+        slot.finalize();
+        assert_eq!(slot.var_type, VarType::Integer);
+    }
+
+    #[test]
+    fn test_bounded_vec_zero_capacity() {
+        let mut bounded = BoundedVec::new(0);
+        bounded.push("line1".to_string());
+        bounded.push("line2".to_string());
+        assert_eq!(bounded.items().len(), 0);
+        assert_eq!(bounded.total_seen, 2);
     }
 }
