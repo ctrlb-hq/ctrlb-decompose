@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1
+
+# --- Build stage -------------------------------------------------------
+FROM rust:1-alpine AS builder
+RUN apk add --no-cache musl-dev
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY benches ./benches
+
+RUN cargo build --release --locked --bin ctrlb-decompose
+
+# --- Runtime stage -------------------------------------------------------
+FROM alpine:3 AS runtime
+
+RUN adduser -D -u 10001 decompose
+COPY --from=builder /app/target/release/ctrlb-decompose /usr/local/bin/ctrlb-decompose
+
+USER decompose
+WORKDIR /logs
+ENTRYPOINT ["ctrlb-decompose"]
+CMD ["--help"]

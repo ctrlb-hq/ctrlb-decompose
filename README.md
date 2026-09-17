@@ -202,10 +202,22 @@ cargo build --release
 
 ### Docker
 
+Two variants are provided — pick whichever base image suits your environment:
+
+| Variant | File | Base | Image size |
+|---|---|---|---|
+| Debian | `Dockerfile` | `debian:bookworm-slim` | ~140MB |
+| Alpine | `Dockerfile.alpine` | `alpine:3` (musl, statically small) | ~19MB |
+
 ```bash
 git clone https://github.com/ctrlb-hq/ctrlb-decompose.git
 cd ctrlb-decompose
+
+# Debian-based image
 docker build -t ctrlb-decompose .
+
+# ...or the smaller Alpine-based image
+docker build -f Dockerfile.alpine -t ctrlb-decompose .
 
 # Pipe a log file in via stdin
 cat /var/log/syslog | docker run --rm -i ctrlb-decompose --llm
