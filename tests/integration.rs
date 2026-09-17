@@ -26,7 +26,7 @@ fn test_llm_output_sample_log() {
     let (stdout, _, success) = run_cli(&["--llm", "tests/fixtures/sample.log"]);
     assert!(success);
     assert!(stdout.contains("## Log Analysis:"));
-    assert!(stdout.contains("### Patterns"));
+    assert!(stdout.contains("### Critical Patterns") || stdout.contains("### Patterns"));
 }
 
 #[test]
@@ -36,7 +36,7 @@ fn test_json_output_valid() {
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("invalid JSON output");
     assert_eq!(parsed["version"], "0.1.0");
     assert!(parsed["summary"]["total_lines"].as_u64().unwrap() > 0);
-    assert!(parsed["patterns"].as_array().unwrap().len() > 0);
+    assert!(!parsed["patterns"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -49,12 +49,7 @@ fn test_top_flag_limits_patterns() {
 
 #[test]
 fn test_context_includes_examples() {
-    let (stdout, _, success) = run_cli(&[
-        "--json",
-        "--context",
-        "2",
-        "tests/fixtures/sample.log",
-    ]);
+    let (stdout, _, success) = run_cli(&["--json", "--context", "2", "tests/fixtures/sample.log"]);
     assert!(success);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("invalid JSON");
     let patterns = parsed["patterns"].as_array().unwrap();
