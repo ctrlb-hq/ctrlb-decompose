@@ -200,6 +200,20 @@ cargo build --release
 # Binary at target/release/ctrlb-decompose
 ```
 
+### Docker
+
+```bash
+git clone https://github.com/ctrlb-hq/ctrlb-decompose.git
+cd ctrlb-decompose
+docker build -t ctrlb-decompose .
+
+# Pipe a log file in via stdin
+cat /var/log/syslog | docker run --rm -i ctrlb-decompose --llm
+
+# Analyze a file by mounting it into the container
+docker run --rm -v "$(pwd)/server.log:/logs/server.log:ro" ctrlb-decompose server.log --top 10
+```
+
 ---
 
 ## Usage
