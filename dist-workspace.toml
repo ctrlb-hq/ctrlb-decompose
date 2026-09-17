@@ -13,7 +13,9 @@ installers = ["shell", "homebrew"]
 tap = "ctrlb-hq/homebrew-tap"
 publish-jobs = ["homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Keep the Windows executable independent of the Visual C++ redistributable.
+msvc-crt-static = true
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # Where to host releases
