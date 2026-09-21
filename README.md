@@ -191,6 +191,32 @@ curl -LO https://github.com/ctrlb-hq/ctrlb-decompose/releases/download/v0.1.0/ct
 sudo dpkg -i ctrlb-decompose_0.1.0-1_amd64.deb
 ```
 
+### Windows x64
+
+Download `ctrlb-decompose-x86_64-pc-windows-msvc.zip` and its `.sha256` file from
+[GitHub Releases](https://github.com/ctrlb-hq/ctrlb-decompose/releases).
+The ZIP contains `ctrlb-decompose.exe`; no Rust installation is required.
+
+In PowerShell, compare the ZIP's SHA-256 hash with the value in the `.sha256` file:
+
+```powershell
+Get-FileHash .\ctrlb-decompose-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Get-Content .\ctrlb-decompose-x86_64-pc-windows-msvc.zip.sha256
+```
+
+Extract the ZIP and run the executable from PowerShell:
+
+```powershell
+Expand-Archive .\ctrlb-decompose-x86_64-pc-windows-msvc.zip -DestinationPath .\ctrlb-decompose
+.\ctrlb-decompose\ctrlb-decompose.exe --version
+.\ctrlb-decompose\ctrlb-decompose.exe --json "C:\logs\server.log"
+Get-Content "C:\logs\server.log" | .\ctrlb-decompose\ctrlb-decompose.exe --json
+```
+
+Optionally, add the extracted directory to your user `PATH` to run
+`ctrlb-decompose` from any directory. This is a command-line tool; run it in a
+terminal instead of double-clicking the executable.
+
 ### Build from source
 
 ```bash
