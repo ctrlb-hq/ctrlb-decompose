@@ -1,0 +1,12 @@
+target
+web
+plugin
+research-paper
+assets
+tests
+.git
+.github
+.claude-plugin
+*.md
+Dockerfile
+.dockerignore
