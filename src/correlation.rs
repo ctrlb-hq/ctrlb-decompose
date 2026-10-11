@@ -128,11 +128,7 @@ fn pearson_correlation(a: &[u64], b: &[u64]) -> f64 {
     }
 
     let denom = (var_a * var_b).sqrt();
-    if denom < 1e-10 {
-        0.0
-    } else {
-        cov / denom
-    }
+    if denom < 1e-10 { 0.0 } else { cov / denom }
 }
 
 fn detect_shared_variables(a: &PatternStats, b: &PatternStats) -> Option<String> {
@@ -182,10 +178,7 @@ fn detect_lag_correlation(a: &[u64], b: &[u64], min_lag: usize, max_lag: usize) 
     for lag in min_lag..=max_lag {
         let shifted_b = &b[lag..n];
         let trimmed_a = &a[..n - lag];
-        let r = pearson_correlation(
-            &trimmed_a.iter().copied().collect::<Vec<_>>(),
-            &shifted_b.iter().copied().collect::<Vec<_>>(),
-        );
+        let r = pearson_correlation(trimmed_a, shifted_b);
         if r > 0.7 {
             return Some(lag);
         }

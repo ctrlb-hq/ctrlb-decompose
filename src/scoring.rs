@@ -46,9 +46,27 @@ fn keyword_weights() -> HashMap<&'static str, f64> {
     }
 
     for kw in [
-        "WARN", "WARNING", "FAIL", "FAILED", "FAILURE", "TIMEOUT", "TIMED_OUT", "REFUSED",
-        "DENIED", "REJECTED", "EXCEPTION", "DEADLOCK", "OVERFLOW", "EXHAUSTED", "UNAVAILABLE",
-        "UNREACHABLE", "UNAUTHORIZED", "FORBIDDEN", "RETRY", "RETRYING", "BACKOFF",
+        "WARN",
+        "WARNING",
+        "FAIL",
+        "FAILED",
+        "FAILURE",
+        "TIMEOUT",
+        "TIMED_OUT",
+        "REFUSED",
+        "DENIED",
+        "REJECTED",
+        "EXCEPTION",
+        "DEADLOCK",
+        "OVERFLOW",
+        "EXHAUSTED",
+        "UNAVAILABLE",
+        "UNREACHABLE",
+        "UNAUTHORIZED",
+        "FORBIDDEN",
+        "RETRY",
+        "RETRYING",
+        "BACKOFF",
     ] {
         map.insert(kw, 5.0);
     }
@@ -111,11 +129,11 @@ fn match_keyword_weight(template: &str, weights: &HashMap<&str, f64>) -> f64 {
     let mut found = false;
 
     for token in &tokens {
-        if let Some(&w) = weights.get(token.as_str()) {
-            if !found || w > max_weight {
-                max_weight = w;
-                found = true;
-            }
+        if let Some(&w) = weights.get(token.as_str())
+            && (!found || w > max_weight)
+        {
+            max_weight = w;
+            found = true;
         }
     }
 
@@ -201,10 +219,7 @@ mod tests {
         let weights = keyword_weights();
         // "warning_count" — tokenized on _, produces "WARNING" and "COUNT"
         // But our delimiter list doesn't include '_', so "WARNING_COUNT" stays as one token.
-        assert_eq!(
-            match_keyword_weight("warning_count is 5", &weights),
-            1.0
-        );
+        assert_eq!(match_keyword_weight("warning_count is 5", &weights), 1.0);
     }
 
     #[test]

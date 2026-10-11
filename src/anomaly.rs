@@ -222,7 +222,10 @@ fn detect_error_pattern(pattern: &PatternStats) -> Option<Anomaly> {
             )
     };
 
-    let tokens: Vec<&str> = prefix_upper.split(delimiters).filter(|s| !s.is_empty()).collect();
+    let tokens: Vec<&str> = prefix_upper
+        .split(delimiters)
+        .filter(|s| !s.is_empty())
+        .collect();
 
     if error_keywords.iter().any(|kw| tokens.contains(kw)) {
         return Some(Anomaly::HighErrorRate {

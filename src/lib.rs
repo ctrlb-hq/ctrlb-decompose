@@ -10,12 +10,15 @@ pub mod types;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
+#[cfg(feature = "cli")]
+pub mod parallel;
+
 use std::collections::HashMap;
 
 use crate::anomaly::detect_anomalies;
 use crate::extraction::drain3::Config;
 use crate::extraction::pipeline::ClpDrainPipeline;
-use crate::scoring::{compute_scores, PatternScore};
+use crate::scoring::{PatternScore, compute_scores};
 use crate::stats::PatternStore;
 use crate::timestamp::{extract_timestamp, strip_timestamp};
 use crate::types::{FormatOptions, PatternID};
@@ -23,17 +26,15 @@ use crate::types::{FormatOptions, PatternID};
 // ── CLI-only imports and types ──────────────────────────────────────────
 
 #[cfg(feature = "cli")]
-use std::fs::File;
+use crate::format::format_output;
 #[cfg(feature = "cli")]
-use std::io::{self, BufRead, BufReader};
+use crate::types::OutputMode;
 #[cfg(feature = "cli")]
 use anyhow::Result;
 #[cfg(feature = "cli")]
 use clap::Parser;
 #[cfg(feature = "cli")]
-use crate::format::format_output;
-#[cfg(feature = "cli")]
-use crate::types::OutputMode;
+use std::io::{self, BufRead, BufReader};
 
 #[cfg(feature = "cli")]
 #[derive(Parser, Debug)]
@@ -94,7 +95,11 @@ impl Args {
     pub fn to_format_options(&self) -> FormatOptions {
         FormatOptions {
             top: self.top,
-            context: if self.llm && self.context == 0 { 2 } else { self.context },
+            context: if self.llm && self.context == 0 {
+                2
+            } else {
+                self.context
+            },
             no_color: self.no_color,
             no_banner: self.no_banner,
             output_mode: self.output_mode(),
@@ -104,47 +109,86 @@ impl Args {
 
 #[cfg(feature = "cli")]
 pub fn run(args: Args) -> Result<()> {
-    let mut reader: Box<dyn BufRead> = match args.file.as_deref() {
-        None | Some("-") => Box::new(BufReader::new(io::stdin())),
-        Some(path) => Box::new(BufReader::new(File::open(path)?)),
-    };
-
     let opts = args.to_format_options();
 
-    let mut pipeline = ClpDrainPipeline::new(Config::default());
-    let mut store = PatternStore::new(opts.context);
-    let mut line_number: u64 = 0;
+    let analysis = match args.file.as_deref() {
+        Some(path) if path != "-" => parallel::process_file_parallel(path, &opts)?,
+        _ => {
+            let mut reader = BufReader::new(io::stdin());
+            let mut pipeline = ClpDrainPipeline::new(Config::default());
+            let mut store = PatternStore::new(opts.context);
+            let mut line_number: u64 = 0;
 
-    let mut raw_buf = Vec::new();
-    loop {
-        raw_buf.clear();
-        let bytes_read = reader.read_until(b'\n', &mut raw_buf)?;
-        if bytes_read == 0 {
-            break;
+            let mut raw_buf = Vec::new();
+            loop {
+                raw_buf.clear();
+                let bytes_read = reader.read_until(b'\n', &mut raw_buf)?;
+                if bytes_read == 0 {
+                    break;
+                }
+                // Fast path: valid UTF-8 (essentially all syslog lines) avoids an allocation.
+                // The lossy path only triggers for malformed bytes.
+                let raw_str = match std::str::from_utf8(&raw_buf) {
+                    Ok(s) => s.trim_end_matches('\r').trim_end_matches('\n'),
+                    Err(_) => {
+                        // Rare: invalid UTF-8 — fall back to lossy, store in a temp String.
+                        // SAFETY: We need a longer-lived binding here.
+                        let lossy = String::from_utf8_lossy(&raw_buf);
+                        let trimmed = lossy.trim_end_matches('\r').trim_end_matches('\n');
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let line = trimmed.to_string();
+                        let ts_match = extract_timestamp(&line);
+                        let stripped = match &ts_match {
+                            Some(ts) => strip_timestamp(&line, ts),
+                            None => line.clone(),
+                        };
+                        let parsed = pipeline.process_line(&stripped);
+                        store.accumulate(
+                            parsed.pattern_id,
+                            &parsed.display_template,
+                            &parsed.variables,
+                            ts_match.map(|ts| ts.datetime),
+                            &line,
+                            line_number,
+                        );
+                        continue;
+                    }
+                };
+                let line = raw_str;
+                if line.is_empty() {
+                    continue;
+                }
+                line_number += 1;
+
+                let ts_match = extract_timestamp(line);
+                let stripped = match &ts_match {
+                    Some(ts) => strip_timestamp(line, ts),
+                    None => line.to_string(),
+                };
+
+                let parsed = pipeline.process_line(&stripped);
+
+                store.accumulate(
+                    parsed.pattern_id,
+                    &parsed.display_template,
+                    &parsed.variables,
+                    ts_match.map(|ts| ts.datetime),
+                    line,
+                    line_number,
+                );
+            }
+
+            store.finalize();
+            let anomalies = detect_anomalies(&store);
+            let scores = compute_scores(&store, &anomalies);
+            AnalysisOutput { store, scores }
         }
-        let line = String::from_utf8_lossy(&raw_buf).trim_end_matches('\n').trim_end_matches('\r').to_string();
-        if line.is_empty() {
-            continue;
-        }
-        line_number += 1;
+    };
 
-        let ts_match = extract_timestamp(&line);
-        let stripped = match &ts_match {
-            Some(ts) => strip_timestamp(&line, ts),
-            None => line.clone(),
-        };
-
-        let parsed = pipeline.process_line(&stripped);
-
-        store.accumulate(
-            parsed.pattern_id,
-            &parsed.display_template,
-            &parsed.variables,
-            ts_match.map(|ts| ts.datetime),
-            &line,
-            line_number,
-        );
-    }
+    let store = &analysis.store;
+    let scores = &analysis.scores;
 
     if !args.quiet {
         eprintln!(
@@ -154,18 +198,11 @@ pub fn run(args: Args) -> Result<()> {
         );
     }
 
-    store.finalize();
-
-    let anomalies = detect_anomalies(&store);
-    let scores = compute_scores(&store, &anomalies);
-
-    let output = format_output(&store, &opts, &scores);
+    let output = format_output(store, &opts, scores);
     print!("{}", output);
 
     if !args.quiet {
-        eprintln!(
-            "\nPowered by CtrlB \u{00b7} Search 5TB of logs in 614ms \u{2192} ctrlb.ai"
-        );
+        eprintln!("\nPowered by CtrlB \u{00b7} Search 5TB of logs in 614ms \u{2192} ctrlb.ai");
     }
 
     Ok(())

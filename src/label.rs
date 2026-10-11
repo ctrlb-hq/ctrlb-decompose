@@ -28,7 +28,10 @@ pub fn infer_label(template: &str, slot_index: usize, var_type: VarType) -> Stri
             }
 
             // Duration keywords
-            if matches!(prev.as_str(), "in" | "after" | "took" | "elapsed" | "waited") {
+            if matches!(
+                prev.as_str(),
+                "in" | "after" | "took" | "elapsed" | "waited"
+            ) {
                 if var_type == VarType::Duration {
                     return "duration".to_string();
                 }
@@ -51,10 +54,7 @@ pub fn infer_label(template: &str, slot_index: usize, var_type: VarType) -> Stri
         // Check following token for time unit suffixes
         if idx + 1 < tokens.len() {
             let next = tokens[idx + 1].to_lowercase();
-            if matches!(
-                next.as_str(),
-                "ms" | "seconds" | "s" | "minutes" | "hours"
-            ) {
+            if matches!(next.as_str(), "ms" | "seconds" | "s" | "minutes" | "hours") {
                 return "duration".to_string();
             }
         }
@@ -103,10 +103,7 @@ mod tests {
 
     #[test]
     fn test_type_default_ipv4() {
-        assert_eq!(
-            infer_label("connecting to <*>", 0, VarType::IPv4),
-            "ip"
-        );
+        assert_eq!(infer_label("connecting to <*>", 0, VarType::IPv4), "ip");
     }
 
     #[test]
@@ -119,9 +116,6 @@ mod tests {
 
     #[test]
     fn test_type_default_uuid() {
-        assert_eq!(
-            infer_label("trace <*> started", 0, VarType::UUID),
-            "uuid"
-        );
+        assert_eq!(infer_label("trace <*> started", 0, VarType::UUID), "uuid");
     }
 }

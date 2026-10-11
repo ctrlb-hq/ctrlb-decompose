@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["cli"]
-cli = ["dep:clap", "dep:colored"]
+cli = ["dep:clap", "dep:colored", "dep:rayon", "dep:memmap2"]
 wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "getrandom/wasm_js"]
 
 [dependencies]
@@ -35,6 +35,8 @@ getrandom = "0.4"
 # CLI-only (feature-gated)
 clap = { version = "4", features = ["derive"], optional = true }
 colored = { version = "2", optional = true }
+rayon = { version = "1.11", optional = true }
+memmap2 = { version = "0.9", optional = true }
 
 # WASM-only (feature-gated)
 wasm-bindgen = { version = "0.2", optional = true }
