@@ -1,6 +1,5 @@
 use crate::extraction::clp::core::{
-    EIGHT_BYTE_ENCODED_FLOAT_DIGITS_BIT_MASK, EncodedVariable,
-    FOUR_BYTE_ENCODED_FLOAT_DIGITS_BIT_MASK, VariablePlaceholder, decode_float_properties,
+    EncodedVariable, VariablePlaceholder, decode_float_properties,
 };
 
 #[derive(Debug, Clone)]
@@ -189,72 +188,6 @@ fn decode_float_var_into<T: EncodedVariable>(encoded_var: T, buffer: &mut String
     buffer.push_str(&digits_str);
 }
 
-/// More optimized version that builds the float string directly in the buffer
-/// without intermediate string allocation
-fn decode_float_var_into_optimized<T: EncodedVariable>(encoded_var: T, buffer: &mut String) {
-    let mut is_negative = false;
-    let mut digits: T::DigitsType;
-    if std::mem::size_of::<T::DigitsType>() == 8 {
-        digits = T::from_u64(0);
-    } else {
-        digits = T::from_u32(0);
-    }
-    let mut num_digits: u8 = 0;
-    let mut decimal_point_pos: u8 = 0;
-
-    decode_float_properties(
-        encoded_var,
-        &mut is_negative,
-        &mut digits,
-        &mut num_digits,
-        &mut decimal_point_pos,
-    );
-
-    if is_negative {
-        buffer.push('-');
-    }
-
-    let digits_value = if std::mem::size_of::<T::DigitsType>() == 8 {
-        T::as_u64(digits)
-    } else {
-        T::as_u32(digits) as u64
-    };
-
-    // Calculate the positions where we need to place digits
-    let total_digits = num_digits as usize;
-    let decimal_pos = total_digits - decimal_point_pos as usize;
-
-    // Handle the case where we need leading zeros
-    let mut temp_digits = Vec::with_capacity(total_digits);
-    let mut remaining = digits_value;
-
-    // Extract digits in reverse order
-    if remaining == 0 {
-        temp_digits.push(0);
-    } else {
-        while remaining > 0 {
-            temp_digits.push((remaining % 10) as u8);
-            remaining /= 10;
-        }
-    }
-
-    // Pad with leading zeros if necessary
-    while temp_digits.len() < total_digits {
-        temp_digits.push(0);
-    }
-
-    // Reverse to get correct order
-    temp_digits.reverse();
-
-    // Build the string with decimal point in the right place
-    for (i, digit) in temp_digits.iter().enumerate() {
-        if i == decimal_pos && decimal_point_pos > 0 {
-            buffer.push('.');
-        }
-        buffer.push((b'0' + digit) as char);
-    }
-}
-
 /// Thread-local decoding context for better performance in single-threaded scenarios
 thread_local! {
     static THREAD_LOCAL_DECODE_CONTEXT: std::cell::RefCell<DecodingContext> =
@@ -276,25 +209,24 @@ pub fn decode_message_fast<T: EncodedVariable>(
 
 #[cfg(test)]
 mod tests {
-    use crate::extraction::clp::core::{EightByteEncodedVariable, decode_message};
+    use crate::extraction::clp::core::{EightByteEncodedVariable, decode_message, encode_message};
 
     use super::*;
     #[test]
     fn test_decoding_context() {
+        let original = "User ID=123 logged in from 192.168.1.1 with balance 45.67";
+        let (logtype, encoded_vars, dictionary_vars) =
+            encode_message::<EightByteEncodedVariable>(original);
+
         let mut context = DecodingContext::new(1024, 64);
-
-        let logtype = "User ID=\x11 logged in from \x12 with balance \x13";
-        let encoded_vars = vec![123i64, 0i64, 0i64]; // Sample encoded values
-        let dictionary_vars = vec!["192.168.1.1".to_string()];
-
         let decoded = context.decode_message::<EightByteEncodedVariable>(
-            logtype,
+            &logtype,
             &encoded_vars,
             &dictionary_vars,
         );
 
-        println!("Decoded: {}", decoded);
-        println!("Stats: {:?}", context.stats());
+        assert_eq!(decoded, original);
+        assert_eq!(context.stats().total_processed, 1);
     }
 
     #[test]
@@ -356,5 +288,45 @@ mod tests {
             "Speedup: {:.2}x",
             no_context_time.as_nanos() as f64 / context_time.as_nanos() as f64
         );
+    }
+
+    #[test]
+    fn test_decode_message_into_matches_decode_message() {
+        let messages = vec![
+            "Simple message with no variables",
+            "Error: code=404 at 10.0.1.15",
+            "Rate: 3.14 req/sec from host abc123",
+            "",
+            "Unicode: hello world test",
+        ];
+
+        for msg in &messages {
+            let (logtype, encoded_vars, dictionary_vars) =
+                encode_message::<EightByteEncodedVariable>(msg);
+
+            // Decode with core::decode_message
+            let decoded_core = decode_message::<EightByteEncodedVariable>(
+                &logtype,
+                &encoded_vars,
+                &dictionary_vars,
+            );
+
+            // Decode with decode_message_into
+            let mut message_buffer = String::new();
+            let mut temp_buffer = String::new();
+            decode_message_into::<EightByteEncodedVariable>(
+                &logtype,
+                &encoded_vars,
+                &dictionary_vars,
+                &mut message_buffer,
+                &mut temp_buffer,
+            );
+
+            assert_eq!(
+                decoded_core, message_buffer,
+                "Mismatch for message: {:?}",
+                msg
+            );
+        }
     }
 }

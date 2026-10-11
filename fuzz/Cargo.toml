@@ -1,0 +1,38 @@
+[package]
+name = "ctrlb-decompose-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.ctrlb-decompose]
+path = ".."
+default-features = false
+
+[[bin]]
+name = "clp_roundtrip"
+path = "fuzz_targets/clp_roundtrip.rs"
+doc = false
+
+[[bin]]
+name = "clp_no_panic"
+path = "fuzz_targets/clp_no_panic.rs"
+doc = false
+
+[[bin]]
+name = "drain_train"
+path = "fuzz_targets/drain_train.rs"
+doc = false
+
+[[bin]]
+name = "timestamp"
+path = "fuzz_targets/timestamp.rs"
+doc = false
+
+[workspace]

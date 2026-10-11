@@ -22,6 +22,8 @@ struct JsonSummary {
     patterns_omitted: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     time_range: Option<JsonTimeRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_label: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -162,6 +164,7 @@ pub fn format(store: &PatternStore, opts: &FormatOptions, scores: &HashMap<Patte
             patterns_shown: top_n,
             patterns_omitted: pattern_count - top_n,
             time_range,
+            source_label: opts.source_label.clone(),
         },
         patterns: json_patterns,
     };

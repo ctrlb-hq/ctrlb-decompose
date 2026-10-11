@@ -77,6 +77,15 @@ pub struct Args {
     /// Suppress progress output on stderr
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Label for the log source (shown in output header)
+    #[arg(long)]
+    pub source_label: Option<String>,
+
+    /// Similarity threshold for pattern clustering (0.0-1.0, default: 0.5).
+    /// Lower merges more aggressively, higher produces more patterns.
+    #[arg(long, default_value_t = 0.5)]
+    pub sim_threshold: f64,
 }
 
 #[cfg(feature = "cli")]
@@ -96,8 +105,10 @@ impl Args {
             top: self.top,
             context: if self.llm && self.context == 0 { 2 } else { self.context },
             no_color: self.no_color,
-            no_banner: self.no_banner,
+            no_banner: self.no_banner || self.llm,
             output_mode: self.output_mode(),
+            source_label: self.source_label.clone(),
+            sim_threshold: self.sim_threshold,
         }
     }
 }
@@ -111,37 +122,46 @@ pub fn run(args: Args) -> Result<()> {
 
     let opts = args.to_format_options();
 
-    let mut pipeline = ClpDrainPipeline::new(Config::default());
+    let mut config = Config::default();
+    config.sim_th = opts.sim_threshold;
+    let mut pipeline = ClpDrainPipeline::new(config);
     let mut store = PatternStore::new(opts.context);
     let mut line_number: u64 = 0;
 
-    let mut raw_buf = Vec::new();
+    let mut line_buf = String::new();
+    let mut stripped_buf = String::new();
     loop {
-        raw_buf.clear();
-        let bytes_read = reader.read_until(b'\n', &mut raw_buf)?;
+        line_buf.clear();
+        let bytes_read = reader.read_line(&mut line_buf)?;
         if bytes_read == 0 {
             break;
         }
-        let line = String::from_utf8_lossy(&raw_buf).trim_end_matches('\n').trim_end_matches('\r').to_string();
+        let line = line_buf.trim_end_matches('\n').trim_end_matches('\r');
         if line.is_empty() {
             continue;
         }
         line_number += 1;
 
-        let ts_match = extract_timestamp(&line);
-        let stripped = match &ts_match {
-            Some(ts) => strip_timestamp(&line, ts),
-            None => line.clone(),
+        let ts_match = extract_timestamp(line);
+        let stripped: &str = match &ts_match {
+            Some(ts) => {
+                stripped_buf.clear();
+                stripped_buf.push_str(&line[..ts.start]);
+                stripped_buf.push_str("<TS>");
+                stripped_buf.push_str(&line[ts.end..]);
+                &stripped_buf
+            }
+            None => line,
         };
 
-        let parsed = pipeline.process_line(&stripped);
+        let parsed = pipeline.process_line(stripped);
 
         store.accumulate(
             parsed.pattern_id,
             &parsed.display_template,
             &parsed.variables,
             ts_match.map(|ts| ts.datetime),
-            &line,
+            line,
             line_number,
         );
     }
@@ -162,7 +182,7 @@ pub fn run(args: Args) -> Result<()> {
     let output = format_output(&store, &opts, &scores);
     print!("{}", output);
 
-    if !args.quiet {
+    if !args.quiet && !opts.no_banner {
         eprintln!(
             "\nPowered by CtrlB \u{00b7} Search 5TB of logs in 614ms \u{2192} ctrlb.ai"
         );
@@ -181,7 +201,9 @@ pub struct AnalysisOutput {
 /// Process log text and return analysis results.
 /// This is the WASM-friendly entry point — no filesystem, no stdin.
 pub fn process_log_text(input: &str, opts: &FormatOptions) -> AnalysisOutput {
-    let mut pipeline = ClpDrainPipeline::new(Config::default());
+    let mut config = Config::default();
+    config.sim_th = opts.sim_threshold;
+    let mut pipeline = ClpDrainPipeline::new(config);
     let mut store = PatternStore::new(opts.context);
     let mut line_number: u64 = 0;
 
