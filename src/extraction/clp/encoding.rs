@@ -124,7 +124,7 @@ pub fn encode_message_into<T: EncodedVariable>(
     }
 }
 
-/// Thread-local encoding context for better performance in single-threaded scenarios
+// Thread-local encoding context for better performance in single-threaded scenarios
 thread_local! {
     static THREAD_LOCAL_ENCODE_CONTEXT: std::cell::RefCell<EncodingContext<EightByteEncodedVariable>> =
         std::cell::RefCell::new(EncodingContext::new(2048, 128));
@@ -192,8 +192,7 @@ mod tests {
         let mut context = EncodingContext::<EightByteEncodedVariable>::new(512, 32);
 
         // Test message with different variable types
-        let message =
-            "User john.doe processed payment $123.45 at timestamp 1640995200 with session abc123";
+        let message = "User user=john.doe processed payment $123.45 at timestamp 1640995200 with session abc123";
         let (logtype, encoded_vars, dictionary_vars) = context.encode_message(message);
 
         println!("Message: {}", message);
@@ -202,8 +201,8 @@ mod tests {
         println!("Dictionary vars: {:?}", dictionary_vars);
 
         // Should have both encoded variables (numbers) and dictionary variables (strings)
-        assert!(encoded_vars.len() > 0);
-        assert!(dictionary_vars.len() > 0);
+        assert!(!encoded_vars.is_empty());
+        assert!(!dictionary_vars.is_empty());
         assert!(dictionary_vars.contains(&"john.doe".to_string()));
         assert!(dictionary_vars.contains(&"abc123".to_string()));
     }
@@ -249,8 +248,8 @@ mod tests {
             let (logtype, encoded_vars, dictionary_vars) = context.encode_message(large_message);
 
             assert!(!logtype.is_empty());
-            assert!(encoded_vars.len() > 0);
-            assert!(dictionary_vars.len() > 0);
+            assert!(!encoded_vars.is_empty());
+            assert!(!dictionary_vars.is_empty());
         }
 
         let final_stats = context.stats();
@@ -269,12 +268,12 @@ mod tests {
     #[test]
     fn test_thread_local_fast_encoding() {
         // Test the fast encoding function
-        let message = "Request ID=12345 processed in 250ms by user admin";
+        let message = "Request ID=12345 processed in 250ms by user=admin";
         let (logtype, encoded_vars, dictionary_vars) = encode_message_fast(message);
 
         assert!(!logtype.is_empty());
-        assert!(encoded_vars.len() > 0);
-        assert!(dictionary_vars.len() > 0);
+        assert!(!encoded_vars.is_empty());
+        assert!(!dictionary_vars.is_empty());
 
         println!("Fast encoding result:");
         println!("  Logtype: {:?}", logtype);
@@ -370,11 +369,11 @@ mod tests {
         assert!(after_resize_stats.dictionary_vars_capacity >= 200);
 
         // Test that it still works after resize
-        let message = "Test message ID=123 with user test@example.com";
+        let message = "Test message ID=123 with user=john.doe";
         let (logtype, encoded_vars, dictionary_vars) = context.encode_message(message);
 
         assert!(!logtype.is_empty());
-        assert!(encoded_vars.len() > 0);
-        assert!(dictionary_vars.len() > 0);
+        assert!(!encoded_vars.is_empty());
+        assert!(!dictionary_vars.is_empty());
     }
 }

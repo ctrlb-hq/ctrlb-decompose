@@ -72,7 +72,11 @@ struct JsonTopValue {
     pct: f64,
 }
 
-pub fn format(store: &PatternStore, opts: &FormatOptions, scores: &HashMap<PatternID, PatternScore>) -> String {
+pub fn format(
+    store: &PatternStore,
+    opts: &FormatOptions,
+    scores: &HashMap<PatternID, PatternScore>,
+) -> String {
     let patterns = store.sorted_patterns();
     let total_lines = store.global_line_count;
     let top_n = opts.top.min(patterns.len());
@@ -145,7 +149,9 @@ pub fn format(store: &PatternStore, opts: &FormatOptions, scores: &HashMap<Patte
                 template: p.template.clone(),
                 count: p.count,
                 frequency_pct: pct,
-                score: ps.map(|s| (s.score * 10.0).round() / 10.0).unwrap_or(p.count as f64),
+                score: ps
+                    .map(|s| (s.score * 10.0).round() / 10.0)
+                    .unwrap_or(p.count as f64),
                 severity: ps.map(|s| s.severity).unwrap_or(Severity::Info),
                 variables,
                 example_lines: p.example_lines.items().to_vec(),

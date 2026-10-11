@@ -7,7 +7,11 @@ use crate::scoring::{PatternScore, Severity};
 use crate::stats::PatternStore;
 use crate::types::{FormatOptions, PatternID};
 
-pub fn format(store: &PatternStore, opts: &FormatOptions, scores: &HashMap<PatternID, PatternScore>) -> String {
+pub fn format(
+    store: &PatternStore,
+    opts: &FormatOptions,
+    scores: &HashMap<PatternID, PatternScore>,
+) -> String {
     let mut out = String::new();
 
     #[cfg(feature = "cli")]

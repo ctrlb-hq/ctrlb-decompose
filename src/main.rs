@@ -1,7 +1,7 @@
 #[cfg(feature = "cli")]
 fn main() -> anyhow::Result<()> {
     use clap::Parser;
-    use ctrlb_decompose::{run, Args};
+    use ctrlb_decompose::{Args, run};
 
     let args = Args::parse();
     run(args)
