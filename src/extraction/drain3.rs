@@ -15,7 +15,7 @@ pub struct Config {
     sim_th: f64,
     max_children: usize,
     extra_delimiters: Vec<String>,
-    max_clusters: usize,
+    pub(crate) max_clusters: usize,
     param_string: String,
 }
 
@@ -583,6 +583,9 @@ impl Drain {
 
         // handle case of empty log string
         if token_count == 0 {
+            first_layer_node
+                .cluster_ids
+                .retain(|&id| self.id_to_cluster.peek(id).is_some());
             first_layer_node.cluster_ids.push(cluster_id);
             return;
         }
@@ -688,6 +691,10 @@ fn get_seq_distance_static(
         panic!("seq1 and seq2 must be of same length");
     }
 
+    if seq1.is_empty() {
+        return (1.0, 0);
+    }
+
     let mut sim_tokens = 0;
     let mut param_count = 0;
 
@@ -736,6 +743,9 @@ fn add_seq_to_prefix_tree_impl(
 
     // handle case of empty log string
     if token_count == 0 {
+        first_layer_node
+            .cluster_ids
+            .retain(|&id| id_to_cluster.peek(id).is_some());
         first_layer_node.cluster_ids.push(cluster_id);
         return;
     }
@@ -814,6 +824,184 @@ fn has_numbers(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_whitespace_records_share_one_cluster() {
+        let mut drain = Drain::new(Config::default());
+        for i in 1..=1_000 {
+            let parsed = drain.extract_template_and_vars(" \t ");
+            assert_eq!(parsed.pattern_id, 1);
+            assert_eq!(parsed.count, i);
+            assert!(parsed.template.is_empty());
+        }
+        assert_eq!(drain.clusters().len(), 1);
+        assert_eq!(drain.root_node.key_to_child_node["0"].cluster_ids.len(), 1);
+        assert_eq!(drain.match_log("").unwrap().id, 1);
+    }
+
+    #[test]
+    fn test_empty_cluster_candidates_drop_evicted_ids() {
+        let mut drain = Drain::new(Config {
+            max_clusters: 1,
+            ..Config::default()
+        });
+        for _ in 0..100 {
+            let cluster = drain.train(" ");
+            assert_eq!(
+                drain.root_node.key_to_child_node["0"].cluster_ids,
+                [cluster.id]
+            );
+            drain.train("occupied");
+        }
+    }
+
+    fn observe_eviction_input(check_bound: bool) -> crate::stats::PatternStore {
+        use crate::extraction::pipeline::ClpDrainPipeline;
+        use crate::stats::PatternStore;
+
+        let mut pipeline = ClpDrainPipeline::new(Config {
+            max_clusters: 3,
+            ..Config::default()
+        });
+        let mut store = PatternStore::with_capacity(0, 3);
+        for (i, word) in ["ggg", "hhh", "iii", "jjj", "kkk", "ggg", "ggg"]
+            .into_iter()
+            .enumerate()
+        {
+            let parsed = pipeline.process_line(word);
+            let minute = match i {
+                0 => -100,
+                1 => 100,
+                _ => 0,
+            };
+            store.accumulate(
+                parsed.pattern_id,
+                &parsed.display_template,
+                &parsed.variables,
+                &parsed.token_slot_counts,
+                &parsed.embedded_tokens,
+                chrono::DateTime::from_timestamp(minute * 60, 0),
+                word,
+                i as u64 + 1,
+            );
+            if check_bound {
+                assert!(store.patterns.len() <= 3, "line {}", i + 1);
+            }
+        }
+        store
+    }
+
+    #[test]
+    fn test_high_count_pattern_survives_drain_lru_eviction() {
+        use crate::extraction::pipeline::ClpDrainPipeline;
+        use crate::stats::PatternStore;
+
+        let mut pipeline = ClpDrainPipeline::new(Config {
+            max_clusters: 10,
+            ..Config::default()
+        });
+        let mut store = PatternStore::with_capacity(0, 10);
+        let lines = (0..1_000)
+            .map(|i| format!("ERROR payment gateway unreachable code={i}"))
+            .chain((b'g'..=b'z').map(|c| format!("word{}", c as char)));
+        for (i, line) in lines.enumerate() {
+            let parsed = pipeline.process_line(&line);
+            store.accumulate(
+                parsed.pattern_id,
+                &parsed.display_template,
+                &parsed.variables,
+                &parsed.token_slot_counts,
+                &parsed.embedded_tokens,
+                None,
+                &line,
+                i as u64 + 1,
+            );
+            assert!(store.patterns.len() <= 10);
+        }
+        let patterns = store.sorted_patterns();
+        assert_eq!(
+            patterns[0].template,
+            "ERROR payment gateway unreachable code=<*>"
+        );
+        assert_eq!(patterns[0].count, 1_000);
+        assert_eq!(store.global_line_count, 1_020);
+        assert_eq!(store.dropped_line_count, 11);
+        assert_eq!(
+            store.dropped_line_count + patterns.iter().map(|p| p.count).sum::<u64>(),
+            store.global_line_count
+        );
+
+        let mut opts = crate::types::FormatOptions {
+            top: 2,
+            context: 0,
+            no_color: true,
+            no_banner: true,
+            output_mode: crate::types::OutputMode::Json,
+        };
+        let json = crate::format::format_output(&store, &opts, &HashMap::new());
+        let output: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(output["patterns"][0]["count"], 1_000);
+        assert_eq!(output["summary"]["total_lines"], 1_020);
+        for mode in [
+            crate::types::OutputMode::Human,
+            crate::types::OutputMode::Llm,
+        ] {
+            opts.output_mode = mode;
+            let output = crate::format::format_output(&store, &opts, &HashMap::new());
+            assert!(output.contains("Statistics for 11 lines were dropped"));
+        }
+    }
+
+    #[test]
+    fn test_evicted_pattern_store_bound_and_global_range() {
+        let store = observe_eviction_input(true);
+        assert_eq!(store.global_line_count, 7);
+        assert_eq!(store.time_range_minutes(), Some((-100, 100)));
+        assert_eq!(store.global_first_ts.unwrap().timestamp(), -6000);
+        assert_eq!(store.global_last_ts.unwrap().timestamp(), 6000);
+        assert_eq!(
+            store
+                .patterns
+                .keys()
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            [4, 5, 6].into()
+        );
+        assert_eq!(store.patterns[&6].count, 2);
+        assert_eq!(store.patterns.values().map(|p| p.count).sum::<u64>(), 4);
+        assert_eq!(store.dropped_line_count, 3);
+        assert_eq!(
+            store.dropped_line_count + store.patterns.values().map(|p| p.count).sum::<u64>(),
+            store.global_line_count
+        );
+    }
+
+    #[test]
+    fn test_evicted_pattern_count_in_json() {
+        let store = observe_eviction_input(false);
+        let opts = crate::types::FormatOptions {
+            top: 3,
+            context: 0,
+            no_color: true,
+            no_banner: true,
+            output_mode: crate::types::OutputMode::Json,
+        };
+        let json = crate::format::format_output(&store, &opts, &HashMap::new());
+        let output: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(output["summary"]["pattern_count"], 3);
+        assert_eq!(output["summary"]["total_lines"], 7);
+        let patterns = output["patterns"].as_array().unwrap();
+        assert_eq!(patterns.len(), 3);
+        assert_eq!(patterns[0]["count"], 2);
+        assert_eq!(
+            store.dropped_line_count
+                + patterns
+                    .iter()
+                    .map(|p| p["count"].as_u64().unwrap())
+                    .sum::<u64>(),
+            output["summary"]["total_lines"].as_u64().unwrap()
+        );
+    }
 
     #[test]
     fn test_drain3() {

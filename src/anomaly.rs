@@ -140,7 +140,7 @@ pub fn detect_anomalies(store: &PatternStore) -> Vec<AnomalyFlags> {
 }
 
 fn detect_frequency_spike(store: &PatternStore, pattern: &PatternStats) -> Option<Anomaly> {
-    let buckets = store.time_bucket_vector(pattern);
+    let buckets = store.time_bucket_vector(pattern).ok()?;
     if buckets.len() < 5 {
         return None;
     }

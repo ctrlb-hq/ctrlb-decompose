@@ -10,6 +10,7 @@ use crate::types::{PatternID, VarType};
 
 const CARDINALITY_CAP: usize = 10_000;
 const EMBEDDED_HISTORY_CAP: usize = 64;
+const TIME_BUCKET_CAP: usize = 10_080;
 
 // --- BoundedVec: reservoir-sampled collection ---
 
@@ -70,6 +71,9 @@ impl NumericStats {
     }
 
     pub fn update(&mut self, value: f64) {
+        if !value.is_finite() {
+            return;
+        }
         self.count += 1;
         self.sum += value;
         if value < self.min {
@@ -288,7 +292,7 @@ impl VarSlotStats {
 fn parse_numeric_value(raw: &str) -> Option<f64> {
     // Try direct parse
     if let Ok(v) = raw.parse::<f64>() {
-        return Some(v);
+        return v.is_finite().then_some(v);
     }
     // Try stripping duration suffix (normalize to milliseconds)
     let suffixes = [
@@ -303,7 +307,8 @@ fn parse_numeric_value(raw: &str) -> Option<f64> {
     for (suffix, multiplier) in suffixes {
         if let Some(num_str) = raw.strip_suffix(suffix) {
             if let Ok(v) = num_str.parse::<f64>() {
-                return Some(v * multiplier);
+                let normalized = v * multiplier;
+                return (v.is_finite() && normalized.is_finite()).then_some(normalized);
             }
         }
     }
@@ -392,19 +397,46 @@ impl PatternStats {
 pub struct PatternStore {
     pub patterns: HashMap<PatternID, PatternStats>,
     pub global_line_count: u64,
+    pub dropped_line_count: u64,
     pub global_first_ts: Option<DateTime<Utc>>,
     pub global_last_ts: Option<DateTime<Utc>>,
     context_lines: usize,
+    max_clusters: usize,
 }
 
 impl PatternStore {
     pub fn new(context_lines: usize) -> Self {
+        Self::with_capacity(context_lines, 0)
+    }
+
+    /// Bound retained patterns independently of Drain's cache; 0 means unlimited.
+    pub fn with_capacity(context_lines: usize, max_clusters: usize) -> Self {
         PatternStore {
             patterns: HashMap::new(),
             global_line_count: 0,
+            dropped_line_count: 0,
             global_first_ts: None,
             global_last_ts: None,
             context_lines,
+            max_clusters,
+        }
+    }
+
+    fn drop_low_count_patterns(&mut self) {
+        // Free roughly 10% at once so selection is amortized O(1) per insertion.
+        let drop_count = (self.max_clusters / 10).max(1);
+        let mut candidates: Vec<_> = self
+            .patterns
+            .values()
+            .map(|p| (p.pattern_id, p.count, p.last_seen_line))
+            .collect();
+        candidates.select_nth_unstable_by_key(drop_count - 1, |&(_, count, last_seen)| {
+            (count, last_seen)
+        });
+        for (id, _, _) in candidates.into_iter().take(drop_count) {
+            if let Some(stats) = self.patterns.remove(&id) {
+                self.dropped_line_count += stats.count;
+            }
         }
     }
 
@@ -433,6 +465,15 @@ impl PatternStore {
                 Some(last) if ts > last => self.global_last_ts = Some(ts),
                 _ => {}
             }
+        }
+
+        // Make room before insertion so the current pattern cannot be dropped.
+        // Updates need no room, even when the store is full.
+        if self.max_clusters != 0
+            && self.patterns.len() >= self.max_clusters
+            && !self.patterns.contains_key(&pattern_id)
+        {
+            self.drop_low_count_patterns();
         }
 
         let ctx = self.context_lines;
@@ -516,36 +557,50 @@ impl PatternStore {
 
     /// Global time range in minutes-since-epoch
     pub fn time_range_minutes(&self) -> Option<(i64, i64)> {
-        let mut min_m = i64::MAX;
-        let mut max_m = i64::MIN;
-        for stats in self.patterns.values() {
-            for &minute in stats.time_buckets.keys() {
-                min_m = min_m.min(minute);
-                max_m = max_m.max(minute);
-            }
-        }
-        if min_m <= max_m {
-            Some((min_m, max_m))
-        } else {
-            None
-        }
+        Some((
+            self.global_first_ts?.timestamp() / 60,
+            self.global_last_ts?.timestamp() / 60,
+        ))
     }
 
-    /// Aligned time-bucket vector for a pattern
-    pub fn time_bucket_vector(&self, pattern: &PatternStats) -> Vec<u64> {
-        if let Some((min_m, max_m)) = self.time_range_minutes() {
-            let len = (max_m - min_m + 1) as usize;
-            let mut vec = vec![0u64; len];
-            for (&minute, &count) in &pattern.time_buckets {
-                let idx = (minute - min_m) as usize;
-                if idx < len {
-                    vec[idx] = count;
+    fn time_bucket_layout(&self) -> anyhow::Result<Option<(i64, i64, usize)>> {
+        let Some((min_m, max_m)) = self.time_range_minutes() else {
+            return Ok(None);
+        };
+        let span = max_m
+            .checked_sub(min_m)
+            .and_then(|n| n.checked_add(1))
+            .filter(|&n| n > 0)
+            .ok_or_else(|| anyhow::anyhow!("time bucket range overflow"))?;
+        let width = (span - 1) / TIME_BUCKET_CAP as i64 + 1;
+        let len = usize::try_from((span - 1) / width + 1)?;
+        anyhow::ensure!(len <= TIME_BUCKET_CAP, "time bucket limit exceeded");
+        Ok(Some((min_m, width, len)))
+    }
+
+    pub fn time_bucket_width_minutes(&self) -> anyhow::Result<i64> {
+        Ok(self.time_bucket_layout()?.map_or(1, |(_, width, _)| width))
+    }
+
+    /// Aligned, bounded buckets. Allocation and count overflow are recoverable.
+    pub fn time_bucket_vector(&self, pattern: &PatternStats) -> anyhow::Result<Vec<u64>> {
+        let Some((min_m, width, len)) = self.time_bucket_layout()? else {
+            return Ok(Vec::new());
+        };
+        let mut buckets = Vec::new();
+        buckets.try_reserve_exact(len)?;
+        buckets.resize(len, 0u64);
+        for (&minute, &count) in &pattern.time_buckets {
+            if let Some(offset) = minute.checked_sub(min_m).filter(|&n| n >= 0) {
+                let idx = usize::try_from(offset / width)?;
+                if let Some(bucket) = buckets.get_mut(idx) {
+                    *bucket = bucket
+                        .checked_add(count)
+                        .ok_or_else(|| anyhow::anyhow!("time bucket count overflow"))?;
                 }
             }
-            vec
-        } else {
-            Vec::new()
         }
+        Ok(buckets)
     }
 }
 
@@ -553,6 +608,178 @@ impl PatternStore {
 mod tests {
     use super::*;
     use crate::extraction::{drain3::Config, pipeline::ClpDrainPipeline};
+
+    fn accumulate_pattern(store: &mut PatternStore, id: PatternID) {
+        store.accumulate(
+            id,
+            "hello",
+            &[],
+            &[],
+            &[],
+            None,
+            "hello",
+            store.global_line_count + 1,
+        );
+        assert_eq!(
+            store.dropped_line_count + store.patterns.values().map(|p| p.count).sum::<u64>(),
+            store.global_line_count
+        );
+    }
+
+    #[test]
+    fn test_pattern_store_batch_drops_low_counts_then_oldest() {
+        let mut store = PatternStore::with_capacity(0, 20);
+        accumulate_pattern(&mut store, 1);
+        accumulate_pattern(&mut store, 1);
+        for id in 2..=20 {
+            accumulate_pattern(&mut store, id);
+        }
+        accumulate_pattern(&mut store, 2);
+        accumulate_pattern(&mut store, 21);
+        assert_eq!(store.patterns.len(), 19);
+        assert_eq!(store.dropped_line_count, 2);
+        assert!(!store.patterns.contains_key(&3));
+        assert!(!store.patterns.contains_key(&4));
+        assert_eq!(store.patterns[&1].count, 2);
+        assert_eq!(store.patterns[&21].count, 1);
+
+        accumulate_pattern(&mut store, 22);
+        accumulate_pattern(&mut store, 5);
+        assert_eq!(store.patterns.len(), 20);
+        assert_eq!(store.dropped_line_count, 2);
+        assert_eq!(store.patterns[&5].count, 2);
+        // A dropped ID may still be active in Drain; count only new observations.
+        accumulate_pattern(&mut store, 3);
+        assert_eq!(store.patterns.len(), 19);
+        assert_eq!(store.patterns[&3].count, 1);
+        assert!(!store.patterns.contains_key(&6));
+        assert!(!store.patterns.contains_key(&7));
+        assert_eq!(store.dropped_line_count, 4);
+    }
+
+    #[test]
+    fn test_pattern_store_capacity_one_protects_current_pattern() {
+        let mut store = PatternStore::with_capacity(0, 1);
+        for id in [1, 1, 2, 2, 1] {
+            accumulate_pattern(&mut store, id);
+            assert_eq!(store.patterns.len(), 1);
+            assert!(store.patterns.contains_key(&id));
+        }
+        assert_eq!(store.dropped_line_count, 4);
+        assert_eq!(store.patterns[&1].count, 1);
+    }
+
+    #[test]
+    fn test_pattern_store_zero_capacity_is_unlimited() {
+        for mut store in [PatternStore::new(0), PatternStore::with_capacity(0, 0)] {
+            for id in 1..=100 {
+                accumulate_pattern(&mut store, id);
+            }
+            assert_eq!(store.patterns.len(), 100);
+            assert_eq!(store.dropped_line_count, 0);
+        }
+    }
+
+    #[test]
+    fn test_non_finite_numeric_parsing() {
+        for raw in [
+            "1.0e309", "-1.0e309", "NaN", "inf", "-inf", "1e309ns", "1e308h", "NaNs",
+        ] {
+            assert_eq!(parse_numeric_value(raw), None, "{raw}");
+        }
+        assert_eq!(parse_numeric_value("42"), Some(42.0));
+        assert_eq!(parse_numeric_value("1.5s"), Some(1500.0));
+    }
+
+    #[test]
+    fn test_non_finite_numeric_updates() {
+        let mut stats = NumericStats::new();
+        stats.update(42.0);
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            stats.update(value);
+        }
+        assert_eq!(stats.count, 1);
+        assert_eq!((stats.sum, stats.min, stats.max), (42.0, 42.0, 42.0));
+        assert_eq!(stats.sketch.count(), 1);
+        assert!(stats.quantile(0.5).unwrap().is_finite());
+    }
+
+    #[test]
+    fn test_non_finite_samples_stay_categorical() {
+        let mut slot = VarSlotStats::new(0);
+        for raw in ["1.0e309", "NaN", "inf", "1e308h"] {
+            slot.update(&TypedVariable {
+                raw: raw.to_string(),
+                var_type: VarType::Float,
+            });
+        }
+        assert!(slot.numeric.is_none());
+        assert_eq!(slot.categorical.total_count, 4);
+        assert_eq!(slot.categorical.unique_count(), 4);
+    }
+
+    #[test]
+    fn test_time_buckets_bound_extreme_ranges() {
+        // Check a modest range first so a regression cannot allocate gigabytes.
+        for (start, end) in [
+            ("2024-01-01T00:00:00Z", "2024-01-15T00:00:00Z"),
+            ("0001-01-01T00:00:00Z", "9999-12-31T23:59:00Z"),
+        ] {
+            let mut store = PatternStore::new(0);
+            for (i, ts) in [start, end].into_iter().enumerate() {
+                store.accumulate(
+                    1,
+                    "INFO hello",
+                    &[],
+                    &[],
+                    &[],
+                    Some(ts.parse().unwrap()),
+                    "INFO hello",
+                    i as u64 + 1,
+                );
+            }
+            let buckets = store.time_bucket_vector(&store.patterns[&1]).unwrap();
+            assert!(buckets.len() <= 10_080, "{} buckets", buckets.len());
+            assert_eq!(buckets.iter().sum::<u64>(), 2);
+            assert_eq!(buckets[0], 1);
+            assert_eq!(*buckets.last().unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn test_time_buckets_keep_minute_resolution() {
+        let mut store = PatternStore::new(0);
+        for (i, minute) in [0, 2, 10_079].into_iter().enumerate() {
+            store.accumulate(
+                1,
+                "hello",
+                &[],
+                &[],
+                &[],
+                DateTime::from_timestamp(minute * 60, 0),
+                "hello",
+                i as u64 + 1,
+            );
+        }
+        let buckets = store.time_bucket_vector(&store.patterns[&1]).unwrap();
+        assert_eq!(store.time_bucket_width_minutes().unwrap(), 1);
+        let mut expected = vec![0; 10_080];
+        for minute in [0, 2, 10_079] {
+            expected[minute] = 1;
+        }
+        assert_eq!(buckets, expected);
+    }
+
+    #[test]
+    fn test_time_bucket_count_overflow_is_recoverable() {
+        let mut store = PatternStore::new(0);
+        store.global_first_ts = DateTime::from_timestamp(0, 0);
+        store.global_last_ts = DateTime::from_timestamp(20_160 * 60, 0);
+        let mut pattern = PatternStats::new(1, "hello".into(), 0);
+        pattern.time_buckets.insert(0, u64::MAX);
+        pattern.time_buckets.insert(1, 1);
+        assert!(store.time_bucket_vector(&pattern).is_err());
+    }
 
     fn observe(pipe: &mut ClpDrainPipeline, store: &mut PatternStore, line: &str) {
         let parsed = pipe.process_line(line);

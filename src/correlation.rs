@@ -28,12 +28,16 @@ pub fn find_correlations(store: &PatternStore) -> Vec<Correlation> {
 
     // Temporal co-occurrence
     for i in 0..top_patterns.len() {
-        let vec_a = store.time_bucket_vector(top_patterns[i]);
+        let Ok(vec_a) = store.time_bucket_vector(top_patterns[i]) else {
+            continue;
+        };
         if vec_a.len() < 3 {
             continue;
         }
         for j in (i + 1)..top_patterns.len() {
-            let vec_b = store.time_bucket_vector(top_patterns[j]);
+            let Ok(vec_b) = store.time_bucket_vector(top_patterns[j]) else {
+                continue;
+            };
             if vec_b.len() < 3 {
                 continue;
             }
@@ -77,15 +81,20 @@ pub fn find_correlations(store: &PatternStore) -> Vec<Correlation> {
 
             // Non-error A's spike precedes error B's spike
             if !is_error_i && is_error_j {
-                let vec_a = store.time_bucket_vector(top_patterns[i]);
-                let vec_b = store.time_bucket_vector(top_patterns[j]);
+                let (Ok(vec_a), Ok(vec_b), Ok(width)) = (
+                    store.time_bucket_vector(top_patterns[i]),
+                    store.time_bucket_vector(top_patterns[j]),
+                    store.time_bucket_width_minutes(),
+                ) else {
+                    continue;
+                };
 
                 if let Some(lag) = detect_lag_correlation(&vec_a, &vec_b, 1, 3) {
                     results.push(Correlation {
                         pattern_a: top_patterns[i].pattern_id,
                         pattern_b: top_patterns[j].pattern_id,
                         correlation_type: CorrelationType::ErrorCascade,
-                        description: format!("precedes error by ~{}min", lag),
+                        description: format!("precedes error by ~{}min", lag as i64 * width),
                         strength: 0.9,
                     });
                 }
