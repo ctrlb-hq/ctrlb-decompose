@@ -493,7 +493,10 @@ impl PatternStore {
         let ctx = self.context_lines;
         let stats = self.patterns.entry(pattern_id).or_insert_with(|| {
             let mut stats = PatternStats::new(pattern_id, template.to_string(), ctx);
-            stats.detected_level = crate::scoring::detect_log_level(raw_line);
+            let stripped = crate::timestamp::extract_timestamp(raw_line)
+                .map(|ts| crate::timestamp::strip_timestamp(raw_line, &ts));
+            stats.detected_level =
+                crate::scoring::detect_log_level(stripped.as_deref().unwrap_or(raw_line));
             stats
         });
 

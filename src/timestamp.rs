@@ -1,4 +1,5 @@
 use chrono::{DateTime, Datelike, NaiveDateTime, Utc};
+use memchr::memchr_iter;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -9,34 +10,68 @@ pub struct TimestampMatch {
     pub end: usize,
 }
 
-// Alternation selects the earliest position. Complete formats precede their
-// inner matches, so an Apache bracket timestamp wins over its syslog portion.
-static RE_TIMESTAMP: Lazy<Regex> = Lazy::new(|| {
+static RE_ISO8601: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?").unwrap()
+});
+
+// Complete enclosing formats are matched before considering yearless syslog.
+static RE_BRACKETED_DATE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(concat!(
         r"\[[A-Z][a-z]{2} [A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2} \d{4}\]",
-        r"|\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?",
         r"|\d{2}/[A-Z][a-z]{2}/\d{4}:\d{2}:\d{2}:\d{2} [+-]\d{4}",
-        r"|[A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2}",
-        r"|\b1[0-9]{9}(?:\d{3})?\b",
     ))
     .unwrap()
 });
 
-/// Extract the first timestamp found in a log line, returning the datetime and byte range.
+static RE_EPOCH: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b1[0-9]{9}(?:\d{3})?\b").unwrap());
+
+static RE_SYSLOG: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2}").unwrap());
+
+/// Prefer the earliest valid dated timestamp, then epoch, then yearless syslog.
 pub fn extract_timestamp(line: &str) -> Option<TimestampMatch> {
+    let iso = find_timestamp(line, &RE_ISO8601, parse_iso8601);
+    // The dated formats cannot overlap each other. Only search before an ISO
+    // candidate for an earlier bracket/common-log date, keeping the usual
+    // leading ISO case cheap without giving it priority over earlier dates.
+    let prefix = &line[..iso.as_ref().map_or(line.len(), |ts| ts.start)];
+    // Both bracket/common-log formats require at least 26 bytes.
+    let dated = if prefix.len() < 26 {
+        None
+    } else {
+        find_timestamp(prefix, &RE_BRACKETED_DATE, |text| {
+            match text.as_bytes()[0] {
+                b'[' => parse_apache_bracket(text),
+                _ => parse_common_log(text),
+            }
+        })
+    };
+    dated
+        .or(iso)
+        .or_else(|| {
+            // Most syslog lines contain only short numeric fields. Require a
+            // possible epoch's ten ASCII digits before checking word boundaries.
+            let bytes = line.as_bytes();
+            memchr_iter(b'1', bytes)
+                .any(|i| {
+                    bytes[i..]
+                        .get(..10)
+                        .is_some_and(|digits| digits.iter().all(u8::is_ascii_digit))
+                })
+                .then(|| find_timestamp(line, &RE_EPOCH, parse_epoch))
+                .flatten()
+        })
+        .or_else(|| find_timestamp(line, &RE_SYSLOG, parse_syslog))
+}
+
+fn find_timestamp(
+    line: &str,
+    regex: &Regex,
+    parse: impl Fn(&str) -> Option<DateTime<Utc>>,
+) -> Option<TimestampMatch> {
     let mut offset = 0;
-    while let Some(matched) = RE_TIMESTAMP.find_at(line, offset) {
-        let text = matched.as_str();
-        // The formats have distinct opening characters or date separators;
-        // identifying them here avoids capture tracking during the search.
-        let datetime = match text.as_bytes()[0] {
-            b'[' => parse_apache_bracket(text),
-            b'A'..=b'Z' => parse_syslog(text),
-            _ if text.contains('/') => parse_common_log(text),
-            _ if text.contains('-') => parse_iso8601(text),
-            _ => parse_epoch(text),
-        };
-        if let Some(datetime) = datetime {
+    while let Some(matched) = regex.find_at(line, offset) {
+        if let Some(datetime) = parse(matched.as_str()) {
             return Some(TimestampMatch {
                 datetime,
                 start: matched.start(),
@@ -139,15 +174,19 @@ mod tests {
                 "[15/Jan/2024:14:22:01 +0000] INFO sent_at=2024-01-15T15:30:00Z",
                 "15/Jan/2024:14:22:01 +0000",
             ),
-            ("1705328521 INFO sent_at=2024-01-15T15:30:00Z", "1705328521"),
+            (
+                "1705328521 INFO sent_at=2024-01-15T15:30:00Z",
+                "2024-01-15T15:30:00Z",
+            ),
             (
                 "2024-01-15T14:22:01Z [Thu Jun 09 06:07:04 2005]",
                 "2024-01-15T14:22:01Z",
             ),
             (
                 "Jan 15 14:22:01 INFO 2024-01-15T15:30:00Z",
-                "Jan 15 14:22:01",
+                "2024-01-15T15:30:00Z",
             ),
+            ("Jan 15 14:22:01 INFO 1705328521", "1705328521"),
             ("[Thu Jun 09 06:07:04 2005]", "[Thu Jun 09 06:07:04 2005]"),
             (
                 "2024-99-99T00:00:00Z then 2024-01-15T14:22:01Z",
@@ -157,6 +196,19 @@ mod tests {
             let ts = extract_timestamp(line).unwrap();
             assert_eq!(&line[ts.start..ts.end], expected);
         }
+    }
+
+    #[test]
+    fn test_syslog_relay_prefers_full_iso_timestamp() {
+        let line =
+            "Jan 15 14:22:01 web1 app[42]: 2024-01-15T14:22:01.123+0530 INFO request done in 12ms";
+        let ts = extract_timestamp(line).unwrap();
+        assert_eq!(&line[ts.start..ts.end], "2024-01-15T14:22:01.123+0530");
+        assert_eq!(ts.datetime.to_rfc3339(), "2024-01-15T08:52:01.123+00:00");
+        assert_eq!(
+            strip_timestamp(line, &ts),
+            "Jan 15 14:22:01 web1 app[42]: <TS> INFO request done in 12ms"
+        );
     }
 
     #[test]
