@@ -111,8 +111,9 @@ pub fn run(args: Args) -> Result<()> {
 
     let opts = args.to_format_options();
 
-    let mut pipeline = ClpDrainPipeline::new(Config::default());
-    let mut store = PatternStore::new(opts.context);
+    let config = Config::default();
+    let mut store = PatternStore::with_capacity(opts.context, config.max_clusters);
+    let mut pipeline = ClpDrainPipeline::new(config);
     let mut line_number: u64 = 0;
 
     let mut raw_buf = Vec::new();
@@ -135,9 +136,6 @@ pub fn run(args: Args) -> Result<()> {
         };
 
         let parsed = pipeline.process_line(&stripped);
-        if let Some(id) = parsed.evicted_pattern_id {
-            store.evict_pattern(id);
-        }
 
         store.accumulate(
             parsed.pattern_id,
@@ -186,8 +184,9 @@ pub struct AnalysisOutput {
 /// Process log text and return analysis results.
 /// This is the WASM-friendly entry point — no filesystem, no stdin.
 pub fn process_log_text(input: &str, opts: &FormatOptions) -> AnalysisOutput {
-    let mut pipeline = ClpDrainPipeline::new(Config::default());
-    let mut store = PatternStore::new(opts.context);
+    let config = Config::default();
+    let mut store = PatternStore::with_capacity(opts.context, config.max_clusters);
+    let mut pipeline = ClpDrainPipeline::new(config);
     let mut line_number: u64 = 0;
 
     for line in input.lines() {
@@ -203,9 +202,6 @@ pub fn process_log_text(input: &str, opts: &FormatOptions) -> AnalysisOutput {
         };
 
         let parsed = pipeline.process_line(&stripped);
-        if let Some(id) = parsed.evicted_pattern_id {
-            store.evict_pattern(id);
-        }
 
         store.accumulate(
             parsed.pattern_id,

@@ -30,6 +30,13 @@ pub fn format(
         total_lines, pattern_count, time_range
     ));
 
+    if store.dropped_line_count > 0 {
+        out.push_str(&format!(
+            "Note: Statistics for {} lines were dropped from low-count patterns to bound memory; line totals include them.\n\n",
+            store.dropped_line_count
+        ));
+    }
+
     // Partition patterns into critical vs high-volume.
     // Critical: only patterns with keyword severity >= Warn (ERROR, WARN, etc.).
     // Anomaly detection is left to the LLM — we just surface the data.

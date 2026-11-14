@@ -49,6 +49,13 @@ pub fn format(store: &PatternStore, opts: &FormatOptions, scores: &HashMap<Patte
         out.push('\n');
     }
 
+    if store.dropped_line_count > 0 {
+        out.push_str(&format!(
+            "Note: Statistics for {} lines were dropped from low-count patterns to bound memory; line totals include them.\n\n",
+            store.dropped_line_count
+        ));
+    }
+
     // Patterns
     let top_n = opts.top.min(patterns.len());
     let shown_lines: u64 = patterns.iter().take(top_n).map(|p| p.count).sum();

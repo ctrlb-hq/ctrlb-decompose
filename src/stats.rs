@@ -397,25 +397,47 @@ impl PatternStats {
 pub struct PatternStore {
     pub patterns: HashMap<PatternID, PatternStats>,
     pub global_line_count: u64,
+    pub dropped_line_count: u64,
     pub global_first_ts: Option<DateTime<Utc>>,
     pub global_last_ts: Option<DateTime<Utc>>,
     context_lines: usize,
+    max_clusters: usize,
 }
 
 impl PatternStore {
     pub fn new(context_lines: usize) -> Self {
+        Self::with_capacity(context_lines, 0)
+    }
+
+    /// Bound retained patterns independently of Drain's cache; 0 means unlimited.
+    pub fn with_capacity(context_lines: usize, max_clusters: usize) -> Self {
         PatternStore {
             patterns: HashMap::new(),
             global_line_count: 0,
+            dropped_line_count: 0,
             global_first_ts: None,
             global_last_ts: None,
             context_lines,
+            max_clusters,
         }
     }
 
-    /// Drop retained statistics without changing whole-input totals or times.
-    pub fn evict_pattern(&mut self, pattern_id: PatternID) {
-        self.patterns.remove(&pattern_id);
+    fn drop_low_count_patterns(&mut self) {
+        // Free roughly 10% at once so selection is amortized O(1) per insertion.
+        let drop_count = (self.max_clusters / 10).max(1);
+        let mut candidates: Vec<_> = self
+            .patterns
+            .values()
+            .map(|p| (p.pattern_id, p.count, p.last_seen_line))
+            .collect();
+        candidates.select_nth_unstable_by_key(drop_count - 1, |&(_, count, last_seen)| {
+            (count, last_seen)
+        });
+        for (id, _, _) in candidates.into_iter().take(drop_count) {
+            if let Some(stats) = self.patterns.remove(&id) {
+                self.dropped_line_count += stats.count;
+            }
+        }
     }
 
     pub fn accumulate(
@@ -443,6 +465,15 @@ impl PatternStore {
                 Some(last) if ts > last => self.global_last_ts = Some(ts),
                 _ => {}
             }
+        }
+
+        // Make room before insertion so the current pattern cannot be dropped.
+        // Updates need no room, even when the store is full.
+        if self.max_clusters != 0
+            && self.patterns.len() >= self.max_clusters
+            && !self.patterns.contains_key(&pattern_id)
+        {
+            self.drop_low_count_patterns();
         }
 
         let ctx = self.context_lines;
@@ -578,6 +609,77 @@ mod tests {
     use super::*;
     use crate::extraction::{drain3::Config, pipeline::ClpDrainPipeline};
 
+    fn accumulate_pattern(store: &mut PatternStore, id: PatternID) {
+        store.accumulate(
+            id,
+            "hello",
+            &[],
+            &[],
+            &[],
+            None,
+            "hello",
+            store.global_line_count + 1,
+        );
+        assert_eq!(
+            store.dropped_line_count + store.patterns.values().map(|p| p.count).sum::<u64>(),
+            store.global_line_count
+        );
+    }
+
+    #[test]
+    fn test_pattern_store_batch_drops_low_counts_then_oldest() {
+        let mut store = PatternStore::with_capacity(0, 20);
+        accumulate_pattern(&mut store, 1);
+        accumulate_pattern(&mut store, 1);
+        for id in 2..=20 {
+            accumulate_pattern(&mut store, id);
+        }
+        accumulate_pattern(&mut store, 2);
+        accumulate_pattern(&mut store, 21);
+        assert_eq!(store.patterns.len(), 19);
+        assert_eq!(store.dropped_line_count, 2);
+        assert!(!store.patterns.contains_key(&3));
+        assert!(!store.patterns.contains_key(&4));
+        assert_eq!(store.patterns[&1].count, 2);
+        assert_eq!(store.patterns[&21].count, 1);
+
+        accumulate_pattern(&mut store, 22);
+        accumulate_pattern(&mut store, 5);
+        assert_eq!(store.patterns.len(), 20);
+        assert_eq!(store.dropped_line_count, 2);
+        assert_eq!(store.patterns[&5].count, 2);
+        // A dropped ID may still be active in Drain; count only new observations.
+        accumulate_pattern(&mut store, 3);
+        assert_eq!(store.patterns.len(), 19);
+        assert_eq!(store.patterns[&3].count, 1);
+        assert!(!store.patterns.contains_key(&6));
+        assert!(!store.patterns.contains_key(&7));
+        assert_eq!(store.dropped_line_count, 4);
+    }
+
+    #[test]
+    fn test_pattern_store_capacity_one_protects_current_pattern() {
+        let mut store = PatternStore::with_capacity(0, 1);
+        for id in [1, 1, 2, 2, 1] {
+            accumulate_pattern(&mut store, id);
+            assert_eq!(store.patterns.len(), 1);
+            assert!(store.patterns.contains_key(&id));
+        }
+        assert_eq!(store.dropped_line_count, 4);
+        assert_eq!(store.patterns[&1].count, 1);
+    }
+
+    #[test]
+    fn test_pattern_store_zero_capacity_is_unlimited() {
+        for mut store in [PatternStore::new(0), PatternStore::with_capacity(0, 0)] {
+            for id in 1..=100 {
+                accumulate_pattern(&mut store, id);
+            }
+            assert_eq!(store.patterns.len(), 100);
+            assert_eq!(store.dropped_line_count, 0);
+        }
+    }
+
     #[test]
     fn test_non_finite_numeric_parsing() {
         for raw in [
@@ -681,9 +783,6 @@ mod tests {
 
     fn observe(pipe: &mut ClpDrainPipeline, store: &mut PatternStore, line: &str) {
         let parsed = pipe.process_line(line);
-        if let Some(id) = parsed.evicted_pattern_id {
-            store.evict_pattern(id);
-        }
         store.accumulate(
             parsed.pattern_id,
             &parsed.display_template,
