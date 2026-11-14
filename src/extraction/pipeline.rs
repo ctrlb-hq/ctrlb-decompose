@@ -1,6 +1,7 @@
 use crate::extraction::clp::core::{EightByteEncodedVariable, VariablePlaceholder, decode_message};
 use crate::extraction::clp::encoding::EncodingContext;
 use crate::extraction::drain3::{Config, Drain, TypedVariable, classify_variable};
+use crate::scoring::{LogLevel, detect_log_level};
 use crate::types::PatternID;
 
 /// Result of processing a log line through the CLP → Drain3 pipeline.
@@ -39,6 +40,14 @@ impl ClpDrainPipeline {
 
     /// Process a single log line (already timestamp-stripped) through the pipeline.
     pub fn process_line(&mut self, stripped: &str) -> PipelineParsedLog {
+        self.process_line_with_level(stripped, detect_log_level(stripped))
+    }
+
+    pub fn process_line_with_level(
+        &mut self,
+        stripped: &str,
+        level: Option<LogLevel>,
+    ) -> PipelineParsedLog {
         // Step 1: CLP encode — normalize variables into placeholders
         let (logtype, encoded_vars, dictionary_vars) = {
             let (lt, ev, dv) = self.clp_ctx.encode_message(stripped);
@@ -46,7 +55,9 @@ impl ClpDrainPipeline {
         };
 
         // Step 2: Feed CLP logtype to Drain3 for structural clustering
-        let parsed = self.drain.extract_template_and_vars(&logtype);
+        let parsed = self
+            .drain
+            .extract_template_and_vars_with_level(&logtype, level);
 
         let (display_template, variables, embedded_tokens, token_slot_counts) =
             extract_template_variables(&parsed.template, &logtype, &encoded_vars, &dictionary_vars);
@@ -229,7 +240,7 @@ fn expand_clp_placeholders(
                 let val = encoded_vars[*encoded_cursor];
                 *encoded_cursor += 1;
                 // Decode integer: the bits are the value
-                (val as u64).to_string()
+                val.to_string()
             } else {
                 *encoded_cursor += 1;
                 "<*>".to_string()
@@ -287,6 +298,13 @@ fn expand_clp_placeholders(
 mod tests {
     use super::*;
     use crate::types::VarType;
+
+    #[test]
+    fn test_signed_integer_in_widened_token() {
+        let (_, variables, _, _) = extract_template_variables("<*>", "\u{11}", &[-1], &[]);
+        assert_eq!(variables[0].raw, "-1");
+        assert_eq!(variables[0].var_type, crate::types::VarType::Integer);
+    }
 
     #[test]
     fn test_pipeline_path_widening_keeps_cursors_in_sync() {

@@ -224,7 +224,11 @@ fn detect_error_pattern(pattern: &PatternStats) -> Option<Anomaly> {
 
     let tokens: Vec<&str> = prefix_upper.split(delimiters).filter(|s| !s.is_empty()).collect();
 
-    if error_keywords.iter().any(|kw| tokens.contains(kw)) {
+    let is_error = pattern
+        .detected_level
+        .is_some_and(|level| level.weight() >= 10.0)
+        || error_keywords.iter().any(|kw| tokens.contains(kw));
+    if is_error {
         return Some(Anomaly::HighErrorRate {
             description: "error-level log pattern".to_string(),
         });

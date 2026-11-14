@@ -102,7 +102,7 @@ pub fn format(store: &PatternStore, opts: &FormatOptions, scores: &HashMap<Patte
                 .map(|(i, v)| {
                     let label = infer_label(&p.template, i, v.var_type);
                     let numeric = v.numeric.as_ref().map(|n| JsonNumeric {
-                        mean: (n.mean() * 10.0).round() / 10.0,
+                        mean: round_tenth(n.mean()),
                         p50: n.quantile(0.5).unwrap_or(0.0),
                         p99: n.quantile(0.99).unwrap_or(0.0),
                         min: n.min,
@@ -145,7 +145,7 @@ pub fn format(store: &PatternStore, opts: &FormatOptions, scores: &HashMap<Patte
                 template: p.template.clone(),
                 count: p.count,
                 frequency_pct: pct,
-                score: ps.map(|s| (s.score * 10.0).round() / 10.0).unwrap_or(p.count as f64),
+                score: ps.map(|s| round_tenth(s.score)).unwrap_or(p.count as f64),
                 severity: ps.map(|s| s.severity).unwrap_or(Severity::Info),
                 variables,
                 example_lines: p.example_lines.items().to_vec(),
@@ -167,4 +167,13 @@ pub fn format(store: &PatternStore, opts: &FormatOptions, scores: &HashMap<Patte
     };
 
     serde_json::to_string(&output).unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e))
+}
+
+fn round_tenth(value: f64) -> f64 {
+    let scaled = value * 10.0;
+    if scaled.is_finite() {
+        scaled.round() / 10.0
+    } else {
+        value
+    }
 }

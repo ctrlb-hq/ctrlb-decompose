@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+use memchr::memchr2_iter;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::Serialize;
 
 use crate::anomaly::AnomalyFlags;
@@ -23,6 +26,112 @@ impl Severity {
             Severity::Debug => "DEBUG",
             Severity::Info => "INFO",
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Notice,
+    Warn,
+    Warning,
+    Error,
+    Fatal,
+    Panic,
+    Crit,
+    Critical,
+    Alert,
+    Emerg,
+    Emergency,
+}
+
+impl LogLevel {
+    // Keep the level roots indexed by the enum's contiguous discriminants.
+    pub(crate) const COUNT: usize = Self::Emergency as usize + 1;
+
+    pub fn weight(self) -> f64 {
+        match self {
+            Self::Trace | Self::Debug => 0.1,
+            Self::Info | Self::Notice => 1.0,
+            Self::Warn | Self::Warning => 5.0,
+            _ => 10.0,
+        }
+    }
+}
+
+static RE_KEYED_LEVEL: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)(?:^|[\s,{\[])['"]?(?:level|lvl|severity)['"]?\s*[:=]\s*['"]?(TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|FATAL|PANIC|CRIT|CRITICAL|ALERT|EMERG|EMERGENCY)\b"#).unwrap()
+});
+
+static RE_BARE_LEVEL: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:^|[\s\[\]():;,\.{}<>])(TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|FATAL|PANIC|CRIT|CRITICAL|ALERT|EMERG|EMERGENCY)(?:$|[\s\[\]():;,\.{}<>])").unwrap()
+});
+
+pub fn detect_log_level(line: &str) -> Option<LogLevel> {
+    let mut end = line.len().min(KEYWORD_PREFIX_LEN);
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    let bytes = line.as_bytes();
+    // Keep Unicode case folding (e.g. the long s in "ſeverity") in the
+    // regex, but skip the full-line search when ASCII input has no level key.
+    let ascii = line.is_ascii();
+    let may_have_key = !ascii
+        || memchr2_iter(b'l', b'L', bytes).any(|i| {
+            bytes[i..]
+                .get(..5)
+                .is_some_and(|s| s.eq_ignore_ascii_case(b"level"))
+                || bytes[i..]
+                    .get(..3)
+                    .is_some_and(|s| s.eq_ignore_ascii_case(b"lvl"))
+        })
+        || memchr2_iter(b's', b'S', bytes).any(|i| {
+            bytes[i..]
+                .get(..8)
+                .is_some_and(|s| s.eq_ignore_ascii_case(b"severity"))
+        });
+    if may_have_key && let Some(captures) = RE_KEYED_LEVEL.captures(line) {
+        return parse_log_level(captures[1].as_bytes());
+    }
+    if ascii {
+        // Splitting ASCII on exactly the bare regex's delimiters gives the
+        // same first complete level token without tracking regex captures.
+        bytes[..end]
+            .split(|byte| matches!(byte, b'\t'..=b'\r') || b" []():;,.{}<>".contains(byte))
+            .find_map(parse_log_level)
+    } else {
+        let captures = RE_BARE_LEVEL.captures(&line[..end])?;
+        parse_log_level(captures[1].as_bytes())
+    }
+}
+
+fn parse_log_level(level: &[u8]) -> Option<LogLevel> {
+    // All level spellings are ASCII and at most nine bytes long.
+    let mut uppercase = [0; 9];
+    if !(4..=uppercase.len()).contains(&level.len()) {
+        return None;
+    }
+    for (out, byte) in uppercase.iter_mut().zip(level) {
+        *out = byte.to_ascii_uppercase();
+    }
+    match &uppercase[..level.len()] {
+        b"TRACE" => Some(LogLevel::Trace),
+        b"DEBUG" => Some(LogLevel::Debug),
+        b"INFO" => Some(LogLevel::Info),
+        b"NOTICE" => Some(LogLevel::Notice),
+        b"WARN" => Some(LogLevel::Warn),
+        b"WARNING" => Some(LogLevel::Warning),
+        b"ERROR" => Some(LogLevel::Error),
+        b"FATAL" => Some(LogLevel::Fatal),
+        b"PANIC" => Some(LogLevel::Panic),
+        b"CRIT" => Some(LogLevel::Crit),
+        b"CRITICAL" => Some(LogLevel::Critical),
+        b"ALERT" => Some(LogLevel::Alert),
+        b"EMERG" => Some(LogLevel::Emerg),
+        b"EMERGENCY" => Some(LogLevel::Emergency),
+        _ => None,
     }
 }
 
@@ -100,15 +209,24 @@ const KEYWORD_PREFIX_LEN: usize = 100;
 /// `KEYWORD_PREFIX_LEN` characters to avoid matching data field names
 /// deep in the template body. Returns the max weight found, or 1.0 if
 /// no keywords match.
+#[cfg(test)]
 fn match_keyword_weight(template: &str, weights: &HashMap<&str, f64>) -> f64 {
+    match_keyword_weight_with_level(template, weights, None)
+}
+
+fn match_keyword_weight_with_level(
+    template: &str,
+    weights: &HashMap<&str, f64>,
+    level: Option<LogLevel>,
+) -> f64 {
     let mut end = template.len().min(KEYWORD_PREFIX_LEN);
     while !template.is_char_boundary(end) {
         end -= 1;
     }
     let prefix = &template[..end];
     let tokens = tokenize_template(prefix);
-    let mut max_weight = 1.0_f64;
-    let mut found = false;
+    let mut max_weight = level.map_or(1.0, LogLevel::weight);
+    let mut found = level.is_some();
 
     for token in &tokens {
         if let Some(&w) = weights.get(token.as_str()) {
@@ -154,7 +272,8 @@ pub fn compute_scores(
     let mut scores = HashMap::new();
 
     for (&pattern_id, pattern) in &store.patterns {
-        let keyword_weight = match_keyword_weight(&pattern.template, &weights);
+        let keyword_weight =
+            match_keyword_weight_with_level(&pattern.template, &weights, pattern.detected_level);
         let anomaly_boost = 1.0 + anomaly_severity.get(&pattern_id).copied().unwrap_or(0.0);
         let score = pattern.count as f64 * keyword_weight * anomaly_boost;
         let severity = severity_from_weight(keyword_weight);
@@ -176,6 +295,40 @@ pub fn compute_scores(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_detect_raw_log_levels() {
+        for (raw, expected) in [
+            ("[ERROR] request failed", Some(LogLevel::Error)),
+            ("<ERROR>; request failed", Some(LogLevel::Error)),
+            ("level=\"warn\" operation=read", Some(LogLevel::Warn)),
+            (r#"{"lvl": "debug"}"#, Some(LogLevel::Debug)),
+            (r#"{"severity": "FATAL"}"#, Some(LogLevel::Fatal)),
+            ("payload level=INFO", Some(LogLevel::Info)),
+            ("level=error_handler", None),
+            (r#"{"error":false}"#, None),
+            ("ordinary message", None),
+        ] {
+            assert_eq!(detect_log_level(raw), expected, "{raw}");
+        }
+        assert_eq!(
+            detect_log_level(&format!("{} ERROR", "x".repeat(101))),
+            None
+        );
+        assert_eq!(
+            detect_log_level(&format!("{} severity=ERROR", "x".repeat(101))),
+            Some(LogLevel::Error)
+        );
+        let weights = keyword_weights();
+        assert_eq!(
+            match_keyword_weight_with_level("level=<*> failed", &weights, Some(LogLevel::Info)),
+            5.0
+        );
+        assert_eq!(
+            match_keyword_weight_with_level("level=<*> normal", &weights, Some(LogLevel::Debug)),
+            0.1
+        );
+    }
 
     #[test]
     fn test_tokenize_template() {

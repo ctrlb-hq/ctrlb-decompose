@@ -292,3 +292,94 @@ fn test_path_slots_at_line_boundaries_through_library() {
         ],
     );
 }
+
+#[test]
+fn test_negative_integer_statistics() {
+    let output = analyze_json("value -1\n");
+    let slot = &output["patterns"][0]["variables"][0];
+    assert_eq!(slot["type"], "Integer");
+    for field in ["mean", "min", "max"] {
+        assert_eq!(slot["numeric"][field], -1.0);
+    }
+}
+
+#[test]
+fn test_raw_levels_partition_patterns() {
+    for (error, info) in [
+        ("level=ERROR operation=read", "level=INFO operation=read"),
+        ("lvl=ERROR operation=read", "lvl=INFO operation=read"),
+        (
+            "severity=ERROR operation=read",
+            "severity=INFO operation=read",
+        ),
+        (
+            r#"{"level":"ERROR","operation":"read"}"#,
+            r#"{"level":"INFO","operation":"read"}"#,
+        ),
+        (
+            "2024-01-01T00:00:00Z ERROR a b c d",
+            "2024-01-01T00:00:00Z INFO a b c d",
+        ),
+    ] {
+        let input = format!("{error}\n{info}\n{error}\n{info}\n");
+        let output = analyze_json(&input);
+        let patterns = output["patterns"].as_array().unwrap();
+        assert_eq!(patterns.len(), 2, "{input}");
+        assert!(patterns.iter().all(|p| p["count"] == 2));
+        let error = patterns.iter().find(|p| p["severity"] == "error").unwrap();
+        assert!(error["score"].as_f64().unwrap() >= 20.0);
+        assert!(patterns.iter().any(|p| p["severity"] == "info"));
+        let llm = analyze_output(&input, ctrlb_decompose::types::OutputMode::Llm);
+        assert!(llm.contains("### Critical Patterns"), "{llm}");
+        let analysis = ctrlb_decompose::process_log_text(
+            &input,
+            &ctrlb_decompose::types::FormatOptions {
+                top: 20,
+                context: 0,
+                no_color: true,
+                no_banner: true,
+                output_mode: ctrlb_decompose::types::OutputMode::Json,
+            },
+        );
+        assert!(
+            ctrlb_decompose::anomaly::detect_anomalies(&analysis.store)
+                .iter()
+                .any(|flags| {
+                    flags.anomalies.iter().any(|a| {
+                        matches!(a, ctrlb_decompose::anomaly::Anomaly::HighErrorRate { .. })
+                    })
+                })
+        );
+    }
+}
+
+#[test]
+fn test_large_finite_output() {
+    for input in ["value 1.0e308\n", "value 1.0e308\nvalue 1.0e308\n"] {
+        let output = analyze_json(input);
+        let numeric = &output["patterns"][0]["variables"][0]["numeric"];
+        for field in ["mean", "min", "max"] {
+            assert_eq!(numeric[field].as_f64(), Some(1.0e308), "{field}: {output}");
+        }
+        for mode in [
+            ctrlb_decompose::types::OutputMode::Human,
+            ctrlb_decompose::types::OutputMode::Llm,
+        ] {
+            let text = analyze_output(input, mode);
+            assert!(!text.contains("inf") && !text.contains("NaN"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn test_levels_and_unmarked_lines_keep_distinct_identities() {
+    let input = "2024-01-01T00:00:00Z ERROR a b c d\n2024-01-01T00:00:00Z FATAL a b c d\n2024-01-01T00:00:00Z WARN a b c d\n2024-01-01T00:00:00Z INFO a b c d\n2024-01-01T00:00:00Z DEBUG a b c d\n2024-01-01T00:00:00Z TRACE a b c d\n";
+    let output = analyze_json(input);
+    assert_eq!(output["patterns"].as_array().unwrap().len(), 6);
+    let output = analyze_json("value 1 accepted a b c\nvalue 2 rejected a b c\n");
+    assert_eq!(output["patterns"].as_array().unwrap().len(), 1);
+    assert_eq!(output["patterns"][0]["count"], 2);
+    let prefix = "x".repeat(100);
+    let output = analyze_json(&format!("{prefix} ERROR a b c\n{prefix} INFO a b c\n"));
+    assert_eq!(output["patterns"].as_array().unwrap().len(), 1);
+}

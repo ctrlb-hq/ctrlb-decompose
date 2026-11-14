@@ -134,7 +134,8 @@ pub fn run(args: Args) -> Result<()> {
             None => line.clone(),
         };
 
-        let parsed = pipeline.process_line(&stripped);
+        let parsed =
+            pipeline.process_line_with_level(&stripped, crate::scoring::detect_log_level(&line));
         if let Some(id) = parsed.evicted_pattern_id {
             store.evict_pattern(id);
         }
@@ -202,7 +203,8 @@ pub fn process_log_text(input: &str, opts: &FormatOptions) -> AnalysisOutput {
             None => line.to_string(),
         };
 
-        let parsed = pipeline.process_line(&stripped);
+        let parsed =
+            pipeline.process_line_with_level(&stripped, crate::scoring::detect_log_level(line));
         if let Some(id) = parsed.evicted_pattern_id {
             store.evict_pattern(id);
         }

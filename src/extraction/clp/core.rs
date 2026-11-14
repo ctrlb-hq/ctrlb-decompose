@@ -161,8 +161,15 @@ pub fn get_bounds_of_next_var(
         end_pos = begin_pos;
         for (offset, c) in msg[begin_pos..].char_indices() {
             if is_delim(c) {
-                end_pos = begin_pos + offset;
-                break;
+                let is_microsecond_suffix = matches!(c, 'µ' | 'μ')
+                    && msg[begin_pos..begin_pos + offset].parse::<f64>().is_ok()
+                    && msg[begin_pos + offset + c.len_utf8()..]
+                        .strip_prefix('s')
+                        .is_some_and(|tail| tail.chars().next().is_none_or(is_delim));
+                if !is_microsecond_suffix {
+                    end_pos = begin_pos + offset;
+                    break;
+                }
             }
             if c.is_ascii_digit() {
                 contains_decimal_digit = true;
@@ -342,11 +349,11 @@ pub fn encode_float_string<T: EncodedVariable>(s: &str) -> Option<T> {
             if std::mem::size_of::<T::DigitsType>() == 8 {
                 // For u64
                 let current = T::as_u64(digits);
-                digits = T::from_u64(current * 10 + digit_val as u64);
+                digits = T::from_u64(current.checked_mul(10)?.checked_add(digit_val as u64)?);
             } else {
                 // For u32
                 let current = T::as_u32(digits);
-                digits = T::from_u32(current * 10 + digit_val);
+                digits = T::from_u32(current.checked_mul(10)?.checked_add(digit_val)?);
             }
 
             num_digits += 1;
@@ -377,12 +384,7 @@ pub fn encode_float_string<T: EncodedVariable>(s: &str) -> Option<T> {
         }
     }
 
-    Some(encode_float_properties::<T>(
-        is_negative,
-        digits,
-        num_digits,
-        decimal_point_pos,
-    ))
+    encode_float_properties::<T>(is_negative, digits, num_digits, decimal_point_pos)
 }
 
 /// Function to encode float properties
@@ -391,7 +393,13 @@ fn encode_float_properties<T: EncodedVariable>(
     digits: T::DigitsType,
     num_digits: usize,
     decimal_point_pos: usize,
-) -> T {
+) -> Option<T> {
+    if !(1..=T::MAX_REPRESENTABLE_DIGITS).contains(&num_digits)
+        || !(1..=num_digits).contains(&decimal_point_pos)
+        || T::as_u64(digits) > T::as_u64(T::DIGITS_BIT_MASK)
+    {
+        return None;
+    }
     if std::mem::size_of::<T>() == 8 {
         // 64-bit encoding
         let mut encoded_float: u64 = 0;
@@ -412,7 +420,7 @@ fn encode_float_properties<T: EncodedVariable>(
         encoded_float |= ((decimal_point_pos - 1) & 0x0F) as u64;
 
         // Convert to T
-        T::from_bits(T::from_u64(encoded_float))
+        Some(T::from_bits(T::from_u64(encoded_float)))
     } else {
         // 32-bit encoding
         let mut encoded_float: u32 = 0;
@@ -433,7 +441,7 @@ fn encode_float_properties<T: EncodedVariable>(
         encoded_float |= ((decimal_point_pos - 1) & 0x07) as u32;
 
         // Convert to T
-        T::from_bits(T::from_u32(encoded_float))
+        Some(T::from_bits(T::from_u32(encoded_float)))
     }
 }
 
@@ -692,9 +700,9 @@ pub fn decode_float_properties<T: EncodedVariable>(
 /// Function to decode an integer variable
 fn decode_integer_var<T: EncodedVariable>(encoded_var: T) -> String {
     if std::mem::size_of::<T>() == 8 {
-        T::as_u64(encoded_var.to_bits()).to_string()
+        (T::as_u64(encoded_var.to_bits()) as i64).to_string()
     } else {
-        T::as_u32(encoded_var.to_bits()).to_string()
+        (T::as_u32(encoded_var.to_bits()) as i32).to_string()
     }
 }
 
@@ -1001,6 +1009,47 @@ mod tests {
                 logtype, encoded_vars, dictionary_vars
             );
             assert_eq!(decoded_message, log_message11); // The decoded message should match the original
+        }
+    }
+
+    #[test]
+    fn test_float_rejects_unrepresentable_digit_counts() {
+        for value in [
+            "0.0000000000000001",
+            ".00000000000000001",
+            "-.00000000000000001",
+        ] {
+            assert!(encode_float_string::<i64>(value).is_none(), "{value}");
+            let (template, encoded, dictionary) = encode_message::<i64>(value);
+            assert_eq!(dictionary, vec![value]);
+            assert_eq!(decode_message(&template, &encoded, &dictionary), value);
+        }
+        for value in ["0.00000001", ".000000001", "4294967296.0"] {
+            assert!(encode_float_string::<i32>(value).is_none(), "{value}");
+        }
+        for value in [".0000000000000001", "0.000000000000001", "-123.45"] {
+            let encoded = encode_float_string::<i64>(value).unwrap();
+            assert_eq!(decode_float_var(encoded), value);
+        }
+        for value in [".00000001", "0.0000001", "-123.45"] {
+            assert_eq!(
+                decode_float_var(encode_float_string::<i32>(value).unwrap()),
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn test_signed_integer_roundtrip() {
+        for value in [i64::MIN, -1, 0, i64::MAX] {
+            let raw = value.to_string();
+            let (template, encoded, dictionary) = encode_message::<i64>(&raw);
+            assert_eq!(decode_message(&template, &encoded, &dictionary), raw);
+        }
+        for value in [i32::MIN, -1, 0, i32::MAX] {
+            let raw = value.to_string();
+            let (template, encoded, dictionary) = encode_message::<i32>(&raw);
+            assert_eq!(decode_message(&template, &encoded, &dictionary), raw);
         }
     }
 }
