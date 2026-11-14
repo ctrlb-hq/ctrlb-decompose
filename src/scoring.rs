@@ -222,7 +222,8 @@ mod tests {
         );
 
         // Realistic false positive: "error" as a JSON field name at ~175 chars
-        let sqq_template = r#"I, [<TS> #<*>] INFO -- : SQS Polling Runner {:mail=>[], :container_tracking=>[{"notificationType"=>"Update", {n1} "success"=><*>, "error"=>nil,"#;
+        let sqq_template = r#"I, [<TS> #<*>] INFO -- : InventoryStorageDepot Batch {:ignored=>[], :updated=>[{"eventType"=>"Update", {n1} "success"=><*>, "error"=>nil, "#;
+        assert!(sqq_template.find("\"error\"").unwrap() >= KEYWORD_PREFIX_LEN);
         assert_eq!(match_keyword_weight(sqq_template, &weights), 1.0);
     }
 

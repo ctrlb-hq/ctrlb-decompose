@@ -408,8 +408,8 @@ mod tests {
     fn test_pipeline_uuid_extraction() {
         let mut pipeline = ClpDrainPipeline::new(Config::default());
 
-        let line1 = "[ts1] [6a18594f-0174-48ae-baa6-b7d072081800] (INFO) [Invista] fetchViewData {\"view_id\":\"879cc438-d86b-4f5b-bb53-2fe1b2a7cd9d\",\"page\":1}";
-        let line2 = "[ts2] [bf918d48-6193-49ae-86ad-7d4fdff7a252] (INFO) [Invista] fetchViewData {\"view_id\":\"879cc438-d86b-4f5b-bb53-2fe1b2a7cd9d\",\"page\":1}";
+        let line1 = "[event_ca4] [1fe23baf-edd0-9bbb-ce78-9414d3c1a4bf] (INFO) [InventoryWorker] updated {\"view_id\":\"1f439352-5e26-2e1c-c2d3-c81bdfc08e23\",\"attempts\":4}";
+        let line2 = "[widget_cc5] [379b4c3f-d6e2-a70a-89c0-89823d7338ec] (INFO) [InventoryWorker] updated {\"view_id\":\"1f439352-5e26-2e1c-c2d3-c81bdfc08e23\",\"attempts\":4}";
 
         let r1 = pipeline.process_line(line1);
         let r2 = pipeline.process_line(line2);
