@@ -54,6 +54,7 @@ impl<T> BoundedVec<T> {
 pub struct NumericStats {
     pub count: u64,
     pub sum: f64,
+    running_mean: f64,
     pub min: f64,
     pub max: f64,
     sketch: DDSketch,
@@ -64,6 +65,7 @@ impl NumericStats {
         NumericStats {
             count: 0,
             sum: 0.0,
+            running_mean: 0.0,
             min: f64::MAX,
             max: f64::MIN,
             sketch: DDSketch::new(DDSketchConfig::defaults()),
@@ -76,6 +78,12 @@ impl NumericStats {
         }
         self.count += 1;
         self.sum += value;
+        let weight = 1.0 / self.count as f64;
+        if self.running_mean.is_sign_negative() == value.is_sign_negative() {
+            self.running_mean += (value - self.running_mean) * weight;
+        } else {
+            self.running_mean = self.running_mean * (1.0 - weight) + value * weight;
+        }
         if value < self.min {
             self.min = value;
         }
@@ -93,6 +101,7 @@ impl NumericStats {
         }
         stats.count = count;
         stats.sum = value * count as f64;
+        stats.running_mean = value;
         stats.min = value;
         stats.max = value;
         // DDSketch has no weighted insertion. Merge powers of two instead.
@@ -118,8 +127,10 @@ impl NumericStats {
     pub fn mean(&self) -> f64 {
         if self.count == 0 {
             0.0
-        } else {
+        } else if self.sum.is_finite() {
             self.sum / self.count as f64
+        } else {
+            self.running_mean
         }
     }
 
@@ -299,6 +310,7 @@ fn parse_numeric_value(raw: &str) -> Option<f64> {
         ("ns", 0.000_001),
         ("us", 0.001),
         ("µs", 0.001),
+        ("μs", 0.001),
         ("ms", 1.0),
         ("s", 1000.0),
         ("m", 60_000.0),
@@ -320,6 +332,7 @@ fn parse_numeric_value(raw: &str) -> Option<f64> {
 pub struct PatternStats {
     pub pattern_id: PatternID,
     pub template: String,
+    pub detected_level: Option<crate::scoring::LogLevel>,
     pub count: u64,
     pub first_seen_line: u64,
     pub last_seen_line: u64,
@@ -340,6 +353,7 @@ impl PatternStats {
         PatternStats {
             pattern_id,
             template,
+            detected_level: None,
             count: 0,
             first_seen_line: 0,
             last_seen_line: 0,
@@ -477,10 +491,14 @@ impl PatternStore {
         }
 
         let ctx = self.context_lines;
-        let stats = self
-            .patterns
-            .entry(pattern_id)
-            .or_insert_with(|| PatternStats::new(pattern_id, template.to_string(), ctx));
+        let stats = self.patterns.entry(pattern_id).or_insert_with(|| {
+            let mut stats = PatternStats::new(pattern_id, template.to_string(), ctx);
+            let stripped = crate::timestamp::extract_timestamp(raw_line)
+                .map(|ts| crate::timestamp::strip_timestamp(raw_line, &ts));
+            stats.detected_level =
+                crate::scoring::detect_log_level(stripped.as_deref().unwrap_or(raw_line));
+            stats
+        });
 
         stats.reconcile_template(template);
         if stats.token_slot_counts != token_slot_counts {
@@ -678,6 +696,52 @@ mod tests {
             assert_eq!(store.patterns.len(), 100);
             assert_eq!(store.dropped_line_count, 0);
         }
+    }
+
+    #[test]
+    fn test_finite_mean_accumulator() {
+        for value in [1.0e308, -1.0e308, f64::MAX] {
+            let mut stats = NumericStats::new();
+            stats.update(value);
+            stats.update(value);
+            assert_eq!(stats.mean(), value);
+            let mut repeated = NumericStats::repeated(value, 8);
+            assert_eq!(repeated.mean(), value);
+            repeated.update(-value);
+            assert!(repeated.mean().is_finite());
+            assert!((repeated.mean() / value - 7.0 / 9.0).abs() < 1e-14);
+        }
+        let mut stats = NumericStats::new();
+        stats.update(f64::MAX);
+        stats.update(-f64::MAX);
+        assert_eq!(stats.mean(), 0.0);
+    }
+
+    #[test]
+    fn test_unicode_microseconds() {
+        let opts = crate::types::FormatOptions {
+            top: 20,
+            context: 0,
+            no_color: true,
+            no_banner: true,
+            output_mode: crate::types::OutputMode::Json,
+        };
+        let result = crate::process_log_text("value 10µs\nvalue 10us\nvalue 10μs\n", &opts);
+        assert_eq!(result.store.patterns.len(), 1);
+        let slot = &result.store.patterns.values().next().unwrap().variables[0];
+        assert_eq!(slot.var_type, VarType::Duration);
+        for raw in ["10µs", "10μs", "10us"] {
+            let result = crate::process_log_text(&format!("value {raw}\n"), &opts);
+            let slot = &result.store.patterns.values().next().unwrap().variables[0];
+            assert_eq!(slot.var_type, VarType::Duration, "{raw}");
+            assert_eq!(slot.numeric.as_ref().unwrap().mean(), 0.01, "{raw}");
+        }
+        let numeric = slot.numeric.as_ref().unwrap();
+        assert_eq!(numeric.count, 3);
+        assert_eq!(
+            (numeric.min, numeric.max, numeric.mean()),
+            (0.01, 0.01, 0.01)
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ use lru::LruCache;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use crate::scoring::LogLevel;
 use crate::types::{PatternID, VarType};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,9 +64,8 @@ static RE_IPV6: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$").unwrap()
 });
 
-static RE_DURATION: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^-?\d+\.?\d*(ns|us|µs|ms|s|m|h)$").unwrap()
-});
+static RE_DURATION: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^-?\d+\.?\d*(ns|us|µs|μs|ms|s|m|h)$").unwrap());
 
 static RE_ISO_TIMESTAMP: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}").unwrap()
@@ -230,6 +230,7 @@ impl Node {
 pub struct Drain {
     config: Config,
     root_node: Node,
+    level_roots: [Node; LogLevel::COUNT],
     id_to_cluster: LogClusterCache,
     clusters_counter: usize,
 }
@@ -245,6 +246,7 @@ impl Drain {
         Drain {
             config: local_config.clone(),
             root_node: Node::new(),
+            level_roots: std::array::from_fn(|_| Node::new()),
             id_to_cluster: LogClusterCache::new(local_config.max_clusters),
             clusters_counter: 0,
         }
@@ -255,13 +257,17 @@ impl Drain {
     }
 
     pub fn train(&mut self, content: &str) -> LogCluster {
+        self.train_with_level(content, None)
+    }
+
+    fn train_with_level(&mut self, content: &str, level: Option<LogLevel>) -> LogCluster {
         let content_tokens = self.get_content_as_tokens(content);
 
         let match_cluster_opt = {
             // Clone needed values to avoid borrowing conflicts
             let sim_th = self.config.sim_th;
 
-            self.tree_search_impl(&content_tokens, sim_th, false)
+            self.tree_search_impl(&content_tokens, sim_th, false, level)
         };
 
         // Match no existing log cluster
@@ -278,7 +284,7 @@ impl Drain {
             self.id_to_cluster.set(cluster_id, match_cluster);
             // let mut root_node = self.root_node.clone();
             // self.add_seq_to_prefix_tree(&mut root_node, cluster_id, &content_tokens);
-            self.add_seq_to_prefix_tree_helper(cluster_id, &content_tokens);
+            self.add_seq_to_prefix_tree_helper(cluster_id, &content_tokens, level);
 
             // Return a new copy of the cluster
             LogCluster {
@@ -326,10 +332,18 @@ impl Drain {
     }
 
     pub fn extract_template_and_vars(&mut self, content: &str) -> ParsedLog {
+        self.extract_template_and_vars_with_level(content, None)
+    }
+
+    pub fn extract_template_and_vars_with_level(
+        &mut self,
+        content: &str,
+        level: Option<LogLevel>,
+    ) -> ParsedLog {
         let content_tokens = self.get_content_as_tokens(content);
 
         // First train/match to get the cluster
-        let cluster = self.train(content);
+        let cluster = self.train_with_level(content, level);
 
         // Extract variables by comparing the template with the original content
         let mut variables = Vec::new();
@@ -358,23 +372,20 @@ impl Drain {
         tokens: &[String],
         sim_th: f64,
         include_params: bool,
+        level: Option<LogLevel>,
     ) -> Option<LogCluster> {
         let token_count = tokens.len();
         let token_count_str = token_count.to_string();
 
-        // Check if the first level exists
-        if !self
-            .root_node
-            .key_to_child_node
-            .contains_key(&token_count_str)
-        {
-            return None;
-        }
+        let root = match level {
+            Some(level) => &self.level_roots[level as usize],
+            None => &self.root_node,
+        };
 
         // Find the path to the correct node, collecting cluster IDs
         let mut cluster_ids = Vec::new();
         {
-            let cur_node = &self.root_node.key_to_child_node[&token_count_str];
+            let cur_node = root.key_to_child_node.get(&token_count_str)?;
 
             // handle case of empty log string
             if token_count == 0 {
@@ -424,15 +435,24 @@ impl Drain {
     }
 
     // Helper method to update the prefix tree while avoiding borrow issues
-    fn add_seq_to_prefix_tree_helper(&mut self, cluster_id: usize, tokens: &[String]) {
+    fn add_seq_to_prefix_tree_helper(
+        &mut self,
+        cluster_id: usize,
+        tokens: &[String],
+        level: Option<LogLevel>,
+    ) {
         // Store values needed by add_seq_to_prefix_tree to avoid borrowing self completely
         let max_node_depth = self.config.max_node_depth;
         let param_string = self.config.param_string.clone();
         let max_children = self.config.max_children;
 
+        let root = match level {
+            Some(level) => &mut self.level_roots[level as usize],
+            None => &mut self.root_node,
+        };
         // Update the tree structure
         add_seq_to_prefix_tree_impl(
-            &mut self.root_node,
+            root,
             cluster_id,
             tokens,
             max_node_depth,

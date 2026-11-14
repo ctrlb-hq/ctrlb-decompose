@@ -87,17 +87,14 @@ pub fn decode_message_into<T: EncodedVariable>(
     let mut dictionary_var_index = 0;
 
     // Process each character in the logtype
-    let mut i = 0;
-    while i < logtype.len() {
-        let c = logtype.as_bytes()[i] as char;
-
-        if c as u8 == VariablePlaceholder::Escape as u8 {
+    let mut chars = logtype.chars();
+    while let Some(c) = chars.next() {
+        if c == VariablePlaceholder::Escape as u8 as char {
             // This is an escape character, so the next character should be taken literally
-            i += 1;
-            if i < logtype.len() {
-                message_buffer.push(logtype.as_bytes()[i] as char);
+            if let Some(escaped) = chars.next() {
+                message_buffer.push(escaped);
             }
-        } else if c as u8 == VariablePlaceholder::Integer as u8 {
+        } else if c == VariablePlaceholder::Integer as u8 as char {
             // Integer variable
             if encoded_var_index < encoded_vars.len() {
                 decode_integer_var_into(encoded_vars[encoded_var_index], temp_buffer);
@@ -105,7 +102,7 @@ pub fn decode_message_into<T: EncodedVariable>(
                 temp_buffer.clear(); // Reuse for next variable
                 encoded_var_index += 1;
             }
-        } else if c as u8 == VariablePlaceholder::Float as u8 {
+        } else if c == VariablePlaceholder::Float as u8 as char {
             // Float variable
             if encoded_var_index < encoded_vars.len() {
                 decode_float_var_into(encoded_vars[encoded_var_index], temp_buffer);
@@ -113,7 +110,7 @@ pub fn decode_message_into<T: EncodedVariable>(
                 temp_buffer.clear(); // Reuse for next variable
                 encoded_var_index += 1;
             }
-        } else if c as u8 == VariablePlaceholder::Dictionary as u8 {
+        } else if c == VariablePlaceholder::Dictionary as u8 as char {
             // Dictionary variable
             if dictionary_var_index < dictionary_vars.len() {
                 message_buffer.push_str(&dictionary_vars[dictionary_var_index]);
@@ -123,8 +120,6 @@ pub fn decode_message_into<T: EncodedVariable>(
             // Regular character
             message_buffer.push(c);
         }
-
-        i += 1;
     }
 }
 
@@ -279,6 +274,25 @@ mod tests {
     use crate::extraction::clp::core::{EightByteEncodedVariable, decode_message};
 
     use super::*;
+
+    #[test]
+    fn test_fast_decoder_utf8() {
+        for (template, expected) in [
+            ("é", "é"),
+            ("你好 🦀", "你好 🦀"),
+            ("\\é\\🦀é", "é🦀é"),
+            ("ē\\\u{11} 🦀", "ē\u{11} 🦀"),
+        ] {
+            assert_eq!(decode_message_fast::<i64>(template, &[], &[]), expected);
+            let mut context = DecodingContext::new(0, 0);
+            assert_eq!(context.decode_message::<i32>(template, &[], &[]), expected);
+        }
+        assert_eq!(
+            decode_message_fast::<i64>("é \u{11} 🦀", &[-1], &[]),
+            "é -1 🦀"
+        );
+    }
+
     #[test]
     fn test_decoding_context() {
         let mut context = DecodingContext::new(1024, 64);
