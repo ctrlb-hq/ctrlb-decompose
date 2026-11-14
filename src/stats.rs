@@ -1,14 +1,15 @@
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap};
 
 use chrono::{DateTime, Utc};
 use hyperloglogplus::{HyperLogLog, HyperLogLogPlus};
 use sketches_ddsketch::{Config as DDSketchConfig, DDSketch};
 use std::collections::hash_map::RandomState;
 
-use crate::extraction::drain3::TypedVariable;
+use crate::extraction::drain3::{TypedVariable, classify_variable};
 use crate::types::{PatternID, VarType};
 
 const CARDINALITY_CAP: usize = 10_000;
+const EMBEDDED_HISTORY_CAP: usize = 64;
 
 // --- BoundedVec: reservoir-sampled collection ---
 
@@ -80,6 +81,36 @@ impl NumericStats {
         let _ = self.sketch.add(value);
     }
 
+    /// Backfill a constant without doing work proportional to prior line count.
+    fn repeated(value: f64, count: u64) -> Self {
+        let mut stats = Self::new();
+        if count == 0 {
+            return stats;
+        }
+        stats.count = count;
+        stats.sum = value * count as f64;
+        stats.min = value;
+        stats.max = value;
+        // DDSketch has no weighted insertion. Merge powers of two instead.
+        let mut block = DDSketch::new(DDSketchConfig::defaults());
+        block.add(value);
+        let mut remaining = count;
+        while remaining != 0 {
+            if remaining & 1 != 0 {
+                stats
+                    .sketch
+                    .merge(&block)
+                    .expect("identical sketch configs");
+            }
+            remaining >>= 1;
+            if remaining != 0 {
+                let copy = block.clone();
+                block.merge(&copy).expect("identical sketch configs");
+            }
+        }
+        stats
+    }
+
     pub fn mean(&self) -> f64 {
         if self.count == 0 {
             0.0
@@ -98,8 +129,7 @@ impl NumericStats {
 pub struct CategoricalStats {
     pub total_count: u64,
     exact_counts: HashMap<String, u64>,
-    hll: Option<HyperLogLogPlus<String, RandomState>>,
-    cached_unique: u64,
+    hll: Option<RefCell<HyperLogLogPlus<String, RandomState>>>,
     capped: bool,
 }
 
@@ -109,12 +139,15 @@ impl CategoricalStats {
             total_count: 0,
             exact_counts: HashMap::new(),
             hll: None,
-            cached_unique: 0,
             capped: false,
         }
     }
 
     pub fn update(&mut self, value: &str) {
+        self.update_with_cap(value, CARDINALITY_CAP + 1);
+    }
+
+    fn update_with_cap(&mut self, value: &str, capacity: usize) {
         self.total_count += 1;
 
         if self.capped {
@@ -123,27 +156,29 @@ impl CategoricalStats {
                 *count += 1;
             }
             if let Some(ref mut hll) = self.hll {
-                hll.insert(&value.to_string());
-                self.cached_unique = hll.count().round() as u64;
+                hll.get_mut().insert(&value.to_string());
             }
         } else {
             *self.exact_counts.entry(value.to_string()).or_insert(0) += 1;
-            self.cached_unique = self.exact_counts.len() as u64;
-            if self.exact_counts.len() > CARDINALITY_CAP {
+            if self.exact_counts.len() >= capacity {
                 self.capped = true;
                 let mut hll =
                     HyperLogLogPlus::new(16, RandomState::new()).expect("HLL creation failed");
                 for key in self.exact_counts.keys() {
                     hll.insert(key);
                 }
-                self.cached_unique = hll.count().round() as u64;
-                self.hll = Some(hll);
+                self.hll = Some(RefCell::new(hll));
             }
         }
     }
 
     pub fn unique_count(&self) -> u64 {
-        self.cached_unique
+        // Counting HLL registers is expensive; do it when read, not per line.
+        self.hll
+            .as_ref()
+            .map_or(self.exact_counts.len() as u64, |hll| {
+                hll.borrow_mut().count().round() as u64
+            })
     }
 
     /// Returns top-k entries as (value, count, percentage)
@@ -191,12 +226,16 @@ impl VarSlotStats {
     }
 
     pub fn update(&mut self, var: &TypedVariable) {
+        self.update_with_cap(var, CARDINALITY_CAP + 1);
+    }
+
+    fn update_with_cap(&mut self, var: &TypedVariable, capacity: usize) {
         // Vote on type (majority wins)
         *self.type_votes.entry(var.var_type).or_insert(0) += 1;
         self.var_type = *self.type_votes.iter().max_by_key(|(_, v)| *v).unwrap().0;
 
         // Always update categorical
-        self.categorical.update(&var.raw);
+        self.categorical.update_with_cap(&var.raw, capacity);
 
         // Update numeric stats for numeric types
         match var.var_type {
@@ -208,6 +247,26 @@ impl VarSlotStats {
             }
             _ => {}
         }
+    }
+
+    fn backfill(slot_index: usize, raw: &str, count: u64) -> Self {
+        let mut slot = Self::new(slot_index);
+        if count == 0 {
+            return slot;
+        }
+        slot.var_type = classify_variable(raw);
+        slot.type_votes.insert(slot.var_type, count);
+        slot.categorical.total_count = count;
+        slot.categorical.exact_counts.insert(raw.to_string(), count);
+        if matches!(
+            slot.var_type,
+            VarType::Integer | VarType::Float | VarType::Duration
+        ) {
+            if let Some(value) = parse_numeric_value(raw) {
+                slot.numeric = Some(NumericStats::repeated(value, count));
+            }
+        }
+        slot
     }
 
     /// Check if this slot should be reclassified as Enum
@@ -264,6 +323,11 @@ pub struct PatternStats {
     pub variables: Vec<VarSlotStats>,
     pub time_buckets: HashMap<i64, u64>, // key = minute since epoch
     pub example_lines: BoundedVec<String>,
+    // One bounded whole-token summary per fixed token with embedded variables.
+    // On widening it replaces that token's subslots, without replaying lines.
+    embedded_history: HashMap<usize, VarSlotStats>,
+    // Sparse counts from extraction, independent of literal display markers.
+    token_slot_counts: Vec<(usize, usize)>,
 }
 
 impl PatternStats {
@@ -279,7 +343,47 @@ impl PatternStats {
             variables: Vec::new(),
             time_buckets: HashMap::new(),
             example_lines: BoundedVec::new(context_lines),
+            embedded_history: HashMap::new(),
+            token_slot_counts: Vec::new(),
         }
+    }
+
+    fn reconcile_template(&mut self, template: &str) {
+        if self.template == template {
+            return;
+        }
+        let mut old_slots = std::mem::take(&mut self.variables).into_iter();
+        let mut counts = self.token_slot_counts.iter().peekable();
+        for (position, (old, new)) in self
+            .template
+            .split_whitespace()
+            .zip(template.split_whitespace())
+            .enumerate()
+        {
+            let subslots = if counts.peek().is_some_and(|(token, _)| *token == position) {
+                counts.next().map_or(0, |(_, count)| *count)
+            } else {
+                0
+            };
+            if old != new {
+                debug_assert_eq!(new, "<*>", "Drain only widens whole tokens");
+                // Discard all subslots belonging to this token; never let their
+                // observations leak into the new slot or its following slots.
+                for _ in old_slots.by_ref().take(subslots) {}
+                let slot = self.embedded_history.remove(&position).unwrap_or_else(|| {
+                    debug_assert_eq!(subslots, 0);
+                    VarSlotStats::backfill(self.variables.len(), old, self.count)
+                });
+                self.variables.push(slot);
+            } else {
+                self.variables.extend(old_slots.by_ref().take(subslots));
+            }
+        }
+        debug_assert!(old_slots.next().is_none());
+        for (index, slot) in self.variables.iter_mut().enumerate() {
+            slot.slot_index = index;
+        }
+        self.template = template.to_string();
     }
 }
 
@@ -309,6 +413,8 @@ impl PatternStore {
         pattern_id: PatternID,
         template: &str,
         variables: &[TypedVariable],
+        token_slot_counts: &[(usize, usize)],
+        embedded_tokens: &[(usize, String)],
         timestamp: Option<DateTime<Utc>>,
         raw_line: &str,
         line_number: u64,
@@ -335,9 +441,10 @@ impl PatternStore {
             .entry(pattern_id)
             .or_insert_with(|| PatternStats::new(pattern_id, template.to_string(), ctx));
 
-        // Always update template to the latest from Drain3 — it evolves
-        // as more lines are seen (more positions become <*>)
-        stats.template = template.to_string();
+        stats.reconcile_template(template);
+        if stats.token_slot_counts != token_slot_counts {
+            stats.token_slot_counts = token_slot_counts.to_vec();
+        }
 
         stats.count += 1;
         if stats.first_seen_line == 0 {
@@ -366,16 +473,32 @@ impl PatternStore {
         // Variable stats
         for (i, var) in variables.iter().enumerate() {
             while stats.variables.len() <= i {
-                stats.variables.push(VarSlotStats::new(stats.variables.len()));
+                stats
+                    .variables
+                    .push(VarSlotStats::new(stats.variables.len()));
             }
             stats.variables[i].update(var);
+        }
+
+        for (position, raw) in embedded_tokens {
+            let history = stats
+                .embedded_history
+                .entry(*position)
+                .or_insert_with(|| VarSlotStats::new(0));
+            history.update_with_cap(
+                &TypedVariable {
+                    var_type: classify_variable(raw),
+                    raw: raw.clone(),
+                },
+                EMBEDDED_HISTORY_CAP,
+            );
         }
 
         // Example lines
         stats.example_lines.push(raw_line.to_string());
     }
 
-    /// Run post-accumulation fixups (enum reclassification, etc.)
+    /// Reclassify enums; all slot reconciliation happens during accumulation.
     pub fn finalize(&mut self) {
         for stats in self.patterns.values_mut() {
             for var in &mut stats.variables {
@@ -422,6 +545,223 @@ impl PatternStore {
             vec
         } else {
             Vec::new()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extraction::{drain3::Config, pipeline::ClpDrainPipeline};
+
+    fn observe(pipe: &mut ClpDrainPipeline, store: &mut PatternStore, line: &str) {
+        let parsed = pipe.process_line(line);
+        store.accumulate(
+            parsed.pattern_id,
+            &parsed.display_template,
+            &parsed.variables,
+            &parsed.token_slot_counts,
+            &parsed.embedded_tokens,
+            None,
+            line,
+            store.global_line_count + 1,
+        );
+    }
+
+    #[test]
+    fn test_literal_wildcards_do_not_shift_slots_on_widening() {
+        for (first, second) in [
+            (
+                "INFO literal=<*><*> count=10 end",
+                "INFO other count=20 end",
+            ),
+            (
+                "INFO literal=<*><*> accepted count=10 end",
+                "INFO literal=<*><*> rejected count=20 end",
+            ),
+            (
+                "INFO route=<*>/foo/1/2 count=10 end",
+                "INFO route=<*>/bar/3/4 count=20 end",
+            ),
+        ] {
+            let mut pipe = ClpDrainPipeline::new(Config::default());
+            let mut store = PatternStore::new(0);
+            observe(&mut pipe, &mut store, first);
+            observe(&mut pipe, &mut store, second);
+            store.finalize();
+
+            assert_eq!(store.patterns.len(), 1);
+            let stats = &store.patterns[&1];
+            assert_eq!(stats.count, 2);
+            assert_eq!(stats.variables.len(), 2);
+            for (index, slot) in stats.variables.iter().enumerate() {
+                assert_eq!(slot.slot_index, index);
+                assert_eq!(slot.categorical.total_count, 2);
+            }
+            let widened = &stats.variables[0];
+            let position = if first.contains("accepted") { 2 } else { 1 };
+            for line in [first, second] {
+                let token = line.split_whitespace().nth(position).unwrap();
+                assert_eq!(widened.categorical.exact_counts[token], 1);
+            }
+            let count = stats.variables[1].numeric.as_ref().unwrap();
+            assert_eq!(count.count, 2);
+            assert_eq!((count.min, count.max, count.sum), (10.0, 20.0, 30.0));
+        }
+    }
+
+    #[test]
+    fn test_fixed_tokens_do_not_allocate_embedded_history() {
+        let mut pipe = ClpDrainPipeline::new(Config::default());
+        let mut store = PatternStore::new(0);
+        for words in 100..600 {
+            observe(
+                &mut pipe,
+                &mut store,
+                &format!("{}end", "word ".repeat(words)),
+            );
+        }
+        assert_eq!(store.patterns.len(), 500);
+        for stats in store.patterns.values() {
+            assert!(stats.variables.is_empty());
+            assert_eq!(stats.embedded_history.len(), 0);
+            assert_eq!(stats.embedded_history.capacity(), 0);
+            assert!(stats.token_slot_counts.is_empty());
+            assert_eq!(stats.token_slot_counts.capacity(), 0);
+        }
+    }
+
+    #[test]
+    fn test_late_widening_reconciles_all_slot_counts_and_numeric_stats() {
+        let mut pipe = ClpDrainPipeline::new(Config::default());
+        let mut store = PatternStore::new(0);
+        let n = 10_000;
+        for value in 1..=n {
+            observe(
+                &mut pipe,
+                &mut store,
+                &format!(
+                    "INFO route=/foo/1/2 action accepted elapsed={value} bytes={} end",
+                    value * 2,
+                ),
+            );
+        }
+        // Also exercise finalization before further accumulation and widening.
+        store.finalize();
+        observe(
+            &mut pipe,
+            &mut store,
+            &format!(
+                "INFO route=/bar/3/4 action rejected elapsed={} bytes={} tail",
+                n + 1,
+                (n + 1) * 2,
+            ),
+        );
+        store.finalize();
+        store.finalize();
+        assert_eq!(store.patterns.len(), 1);
+        let stats = &store.patterns[&1];
+        assert_eq!(
+            stats.template,
+            "INFO <*> action <*> elapsed=<*> bytes=<*> <*>"
+        );
+        assert_eq!(stats.count, n + 1);
+        assert_eq!(stats.variables.len(), 5);
+        for (index, slot) in stats.variables.iter().enumerate() {
+            assert_eq!(slot.slot_index, index);
+            assert_eq!(slot.categorical.total_count, n + 1);
+        }
+        for (index, old, new) in [
+            (0, "route=/foo/1/2", "route=/bar/3/4"),
+            (1, "accepted", "rejected"),
+            (4, "end", "tail"),
+        ] {
+            let slot = &stats.variables[index];
+            assert!(slot.numeric.is_none());
+            assert_eq!(slot.categorical.exact_counts.len(), 2);
+            assert_eq!(slot.categorical.exact_counts[old], n);
+            assert_eq!(slot.categorical.exact_counts[new], 1);
+        }
+        for (index, multiplier) in [(2, 1), (3, 2)] {
+            let numeric = stats.variables[index].numeric.as_ref().unwrap();
+            assert_eq!(numeric.count, n + 1);
+            assert_eq!(numeric.min, multiplier as f64);
+            assert_eq!(numeric.max, ((n + 1) * multiplier) as f64);
+            assert_eq!(numeric.sum, ((n + 1) * (n + 2) / 2 * multiplier) as f64);
+            assert_eq!(numeric.mean(), ((n + 2) * multiplier) as f64 / 2.0);
+            let median = ((n / 2 + 1) * multiplier) as f64;
+            assert!((numeric.quantile(0.5).unwrap() / median - 1.0).abs() < 0.011);
+        }
+    }
+
+    #[test]
+    fn test_capped_embedded_history_keeps_other_numeric_slots_exact() {
+        let mut pipe = ClpDrainPipeline::new(Config::default());
+        let mut store = PatternStore::new(0);
+        let n = 2_000;
+        for value in 1..=n {
+            observe(
+                &mut pipe,
+                &mut store,
+                &format!(
+                    "INFO request path=/foo/{value}/{} elapsed={value}",
+                    value + 1,
+                ),
+            );
+        }
+        let history = &store.patterns[&1].embedded_history[&2];
+        assert_eq!(history.categorical.exact_counts.len(), EMBEDDED_HISTORY_CAP);
+        assert_eq!(history.categorical.total_count, n);
+        assert!(history.categorical.capped);
+        observe(
+            &mut pipe,
+            &mut store,
+            &format!("INFO request path=/bar/9/10 elapsed={}", n + 1,),
+        );
+        store.finalize();
+        assert_eq!(store.patterns.len(), 1);
+        let stats = &store.patterns[&1];
+        assert_eq!(stats.template, "INFO request <*> elapsed=<*>");
+        assert_eq!(stats.variables.len(), 2);
+        assert!(!stats.embedded_history.contains_key(&2));
+        let path = &stats.variables[0];
+        assert!(path.numeric.is_none());
+        assert_eq!(path.categorical.total_count, n + 1);
+        assert_eq!(path.categorical.exact_counts["path=/foo/1/2"], 1);
+        // The cap deliberately omits later values, but never changes totals.
+        assert!(
+            !path
+                .categorical
+                .exact_counts
+                .contains_key("path=/foo/100/101")
+        );
+        let elapsed = stats.variables[1].numeric.as_ref().unwrap();
+        assert_eq!(stats.variables[1].categorical.total_count, n + 1);
+        assert_eq!(elapsed.count, n + 1);
+        assert_eq!(elapsed.sum, ((n + 1) * (n + 2) / 2) as f64);
+        assert_eq!(elapsed.mean(), (n + 2) as f64 / 2.0);
+        assert_eq!((elapsed.min, elapsed.max), (1.0, (n + 1) as f64));
+    }
+
+    #[test]
+    fn test_plain_numeric_widening_backfills_a_billion_observations() {
+        // Exercise the plain-numeric contract directly: normal CLP encoding
+        // usually turns a numeric token into a placeholder before Drain sees it.
+        let mut stats = PatternStats::new(1, "INFO job 7".into(), 0);
+        stats.count = 1_000_000_000;
+        stats.reconcile_template("INFO job <*>");
+        let slot = &stats.variables[0];
+        assert_eq!(slot.slot_index, 0);
+        assert_eq!(slot.var_type, VarType::Integer);
+        assert_eq!(slot.categorical.total_count, stats.count);
+        assert_eq!(slot.categorical.exact_counts["7"], stats.count);
+        let numeric = slot.numeric.as_ref().unwrap();
+        assert_eq!(numeric.count, stats.count);
+        assert_eq!(numeric.sketch.count(), stats.count as usize);
+        assert_eq!(numeric.sum, 7_000_000_000.0);
+        assert_eq!((numeric.min, numeric.max, numeric.mean()), (7.0, 7.0, 7.0));
+        for q in [0.0, 0.5, 0.99, 1.0] {
+            assert!((numeric.quantile(q).unwrap() / 7.0 - 1.0).abs() < 0.011);
         }
     }
 }

@@ -218,24 +218,17 @@ fn build_labeled_template_for(pattern: &PatternStats) -> String {
 
 fn build_labeled_template(template: &str, labels: &[String]) -> String {
     let mut result = String::new();
-    let mut label_idx = 0;
-
-    for token in template.split_whitespace() {
-        if !result.is_empty() {
-            result.push(' ');
-        }
-        if token == "<*>" {
-            if label_idx < labels.len() {
-                result.push('{');
-                result.push_str(&labels[label_idx]);
-                result.push('}');
-                label_idx += 1;
-            } else {
-                result.push_str("<*>");
-            }
+    let mut parts = template.split("<*>");
+    result.push_str(parts.next().unwrap_or(""));
+    for (label_idx, part) in parts.enumerate() {
+        if let Some(label) = labels.get(label_idx) {
+            result.push('{');
+            result.push_str(label);
+            result.push('}');
         } else {
-            result.push_str(token);
+            result.push_str("<*>");
         }
+        result.push_str(part);
     }
 
     result

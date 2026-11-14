@@ -172,6 +172,7 @@ Extracted variables are classified into semantic types for richer analysis:
 - **Quantiles**: DDSketch — fixed ~200 bytes per numeric slot, no raw value storage
 - **Cardinality**: HyperLogLog++ — ~200 bytes per high-cardinality variable
 - **Examples**: Reservoir sampling — bounded buffer per pattern
+- **Template widening**: Slot statistics are reconciled while streaming; input lines are not retained for replay. A newly variable plain token is backfilled with its previous value and count. For fixed tokens with embedded CLP variables, a whole-token summary retains exact total counts, type votes, and numeric aggregates (with the usual DDSketch quantile error), plus counts for the first 64 distinct whole-token values. If that token later widens, its summary replaces its embedded slots; all other slots keep their original statistics. At 64 distinct values, cardinality uses HLL++; subsequent untracked values can be absent from `top_values`, even if frequent, including after widening. Counts for retained values and the total observation count stay exact. These summaries are bounded by token positions and cardinality caps, independent of input line count.
 
 ---
 

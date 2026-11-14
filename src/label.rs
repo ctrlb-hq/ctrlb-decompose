@@ -4,20 +4,34 @@ use crate::types::VarType;
 pub fn infer_label(template: &str, slot_index: usize, var_type: VarType) -> String {
     let tokens: Vec<&str> = template.split_whitespace().collect();
 
-    // Find the nth wildcard position
+    // Count every occurrence, including embedded and multiple placeholders.
     let mut wildcard_count = 0;
     let mut token_idx = None;
     for (i, token) in tokens.iter().enumerate() {
-        if *token == "<*>" {
+        for (offset, _) in token.match_indices("<*>") {
             if wildcard_count == slot_index {
-                token_idx = Some(i);
+                token_idx = Some((i, offset));
                 break;
             }
             wildcard_count += 1;
         }
+        if token_idx.is_some() {
+            break;
+        }
     }
 
-    if let Some(idx) = token_idx {
+    if let Some((idx, offset)) = token_idx {
+        // Inline key=<*> has its key in the same token as the wildcard.
+        if let Some(prefix) = tokens[idx][..offset].strip_suffix('=') {
+            let key = prefix
+                .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()
+                .unwrap_or("");
+            if !key.is_empty() {
+                return sanitize_label(key);
+            }
+        }
+
         // Check preceding token for contextual hints
         if idx > 0 {
             let prev = tokens[idx - 1].to_lowercase();
@@ -28,7 +42,10 @@ pub fn infer_label(template: &str, slot_index: usize, var_type: VarType) -> Stri
             }
 
             // Duration keywords
-            if matches!(prev.as_str(), "in" | "after" | "took" | "elapsed" | "waited") {
+            if matches!(
+                prev.as_str(),
+                "in" | "after" | "took" | "elapsed" | "waited"
+            ) {
                 if var_type == VarType::Duration {
                     return "duration".to_string();
                 }
@@ -51,10 +68,7 @@ pub fn infer_label(template: &str, slot_index: usize, var_type: VarType) -> Stri
         // Check following token for time unit suffixes
         if idx + 1 < tokens.len() {
             let next = tokens[idx + 1].to_lowercase();
-            if matches!(
-                next.as_str(),
-                "ms" | "seconds" | "s" | "minutes" | "hours"
-            ) {
+            if matches!(next.as_str(), "ms" | "seconds" | "s" | "minutes" | "hours") {
                 return "duration".to_string();
             }
         }
@@ -103,10 +117,7 @@ mod tests {
 
     #[test]
     fn test_type_default_ipv4() {
-        assert_eq!(
-            infer_label("connecting to <*>", 0, VarType::IPv4),
-            "ip"
-        );
+        assert_eq!(infer_label("connecting to <*>", 0, VarType::IPv4), "ip");
     }
 
     #[test]
@@ -119,9 +130,6 @@ mod tests {
 
     #[test]
     fn test_type_default_uuid() {
-        assert_eq!(
-            infer_label("trace <*> started", 0, VarType::UUID),
-            "uuid"
-        );
+        assert_eq!(infer_label("trace <*> started", 0, VarType::UUID), "uuid");
     }
 }

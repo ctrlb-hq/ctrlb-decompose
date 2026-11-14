@@ -1,6 +1,4 @@
-use crate::extraction::clp::core::{
-    EightByteEncodedVariable, VariablePlaceholder, decode_message,
-};
+use crate::extraction::clp::core::{EightByteEncodedVariable, VariablePlaceholder, decode_message};
 use crate::extraction::clp::encoding::EncodingContext;
 use crate::extraction::drain3::{Config, Drain, TypedVariable, classify_variable};
 use crate::types::PatternID;
@@ -10,6 +8,12 @@ pub struct PipelineParsedLog {
     pub pattern_id: PatternID,
     pub display_template: String,
     pub variables: Vec<TypedVariable>,
+    /// Actual variable counts for tokens that have slots, in token order.
+    /// Literal `<*>` text in a fixed token does not contribute a slot.
+    pub token_slot_counts: Vec<(usize, usize)>,
+    /// Decoded fixed tokens with embedded CLP variables, indexed by token position.
+    /// These feed bounded summaries in case Drain later widens the whole token.
+    pub embedded_tokens: Vec<(usize, String)>,
     pub count: u64,
 }
 
@@ -42,77 +46,103 @@ impl ClpDrainPipeline {
         // Step 2: Feed CLP logtype to Drain3 for structural clustering
         let parsed = self.drain.extract_template_and_vars(&logtype);
 
-        // Step 3: Merge CLP variables + Drain3 wildcards into unified output
-        let drain_template = &parsed.template;
-        let drain_tokens: Vec<&str> = drain_template.split_whitespace().collect();
-        let logtype_tokens: Vec<&str> = logtype.split_whitespace().collect();
-
-        let mut display_parts: Vec<String> = Vec::new();
-        let mut variables: Vec<TypedVariable> = Vec::new();
-
-        // Cursors into CLP variable arrays
-        let mut encoded_cursor: usize = 0;
-        let mut dict_cursor: usize = 0;
-
-        // Also track a global cursor across the full logtype to handle
-        // CLP variables consumed by tokens we iterate over.
-        // We need a second pair of cursors for the content (logtype) side
-        // to advance past CLP vars in `<*>` positions.
-        let mut content_encoded_cursor: usize = 0;
-        let mut content_dict_cursor: usize = 0;
-
-        for (i, drain_tok) in drain_tokens.iter().enumerate() {
-            if *drain_tok == "<*>" {
-                // Drain3 wildcard: the entire logtype token at this position varied.
-                // Decode the original text from the CLP logtype token + vars.
-                if i < logtype_tokens.len() {
-                    let lt_tok = logtype_tokens[i];
-                    let raw = decode_clp_fragment(
-                        lt_tok,
-                        &encoded_vars,
-                        &mut content_encoded_cursor,
-                        &dictionary_vars,
-                        &mut content_dict_cursor,
-                    );
-                    variables.push(TypedVariable {
-                        var_type: classify_variable(&raw),
-                        raw,
-                    });
-                }
-                display_parts.push("<*>".to_string());
-            } else {
-                // Fixed token in the Drain3 template. It may contain CLP placeholders.
-                let lt_tok = if i < logtype_tokens.len() {
-                    logtype_tokens[i]
-                } else {
-                    drain_tok
-                };
-
-                // Advance content cursors for this token (mirrors what we do with display cursors)
-                advance_clp_cursors(lt_tok, &mut content_encoded_cursor, &mut content_dict_cursor);
-
-                // Build display token: replace each CLP placeholder with <*> and extract vars
-                let (display_tok, tok_vars) = expand_clp_placeholders(
-                    drain_tok,
-                    &encoded_vars,
-                    &mut encoded_cursor,
-                    &dictionary_vars,
-                    &mut dict_cursor,
-                );
-                display_parts.push(display_tok);
-                variables.extend(tok_vars);
-            }
-        }
-
-        let display_template = display_parts.join(" ");
+        let (display_template, variables, embedded_tokens, token_slot_counts) =
+            extract_template_variables(&parsed.template, &logtype, &encoded_vars, &dictionary_vars);
 
         PipelineParsedLog {
             pattern_id: parsed.pattern_id,
             display_template,
             variables,
+            token_slot_counts,
+            embedded_tokens,
             count: parsed.count,
         }
     }
+}
+
+/// Extract against a Drain template. Only a whole-token
+/// wildcard replaces a CLP token; fixed tokens use the original CLP placeholders.
+fn extract_template_variables(
+    template: &str,
+    logtype: &str,
+    encoded_vars: &[EightByteEncodedVariable],
+    dictionary_vars: &[String],
+) -> (
+    String,
+    Vec<TypedVariable>,
+    Vec<(usize, String)>,
+    Vec<(usize, usize)>,
+) {
+    let template_tokens: Vec<&str> = template.split_whitespace().collect();
+    let logtype_tokens: Vec<&str> = logtype.split_whitespace().collect();
+    debug_assert_eq!(template_tokens.len(), logtype_tokens.len());
+
+    let mut display_parts = Vec::new();
+    let mut variables = Vec::new();
+    let mut embedded_tokens = Vec::new();
+    let mut token_slot_counts = Vec::new();
+
+    // Both wildcard decoding and fixed-token expansion consume the same CLP
+    // streams in logtype order. A wildcard must advance both shared cursors.
+    let mut encoded_cursor = 0;
+    let mut dict_cursor = 0;
+
+    for (position, (template_token, logtype_token)) in
+        template_tokens.iter().zip(&logtype_tokens).enumerate()
+    {
+        let slots_before = variables.len();
+        if *template_token == "<*>" {
+            let raw = decode_clp_fragment(
+                logtype_token,
+                encoded_vars,
+                &mut encoded_cursor,
+                dictionary_vars,
+                &mut dict_cursor,
+            );
+            variables.push(TypedVariable {
+                var_type: classify_variable(&raw),
+                raw,
+            });
+            display_parts.push("<*>".to_string());
+        } else {
+            let mut token_encoded_cursor = encoded_cursor;
+            let mut token_dict_cursor = dict_cursor;
+            let (display_token, token_vars) = expand_clp_placeholders(
+                logtype_token,
+                encoded_vars,
+                &mut encoded_cursor,
+                dictionary_vars,
+                &mut dict_cursor,
+            );
+            if !token_vars.is_empty() && display_token != "<*>" {
+                embedded_tokens.push((
+                    position,
+                    decode_clp_fragment(
+                        logtype_token,
+                        encoded_vars,
+                        &mut token_encoded_cursor,
+                        dictionary_vars,
+                        &mut token_dict_cursor,
+                    ),
+                ));
+            }
+            display_parts.push(display_token);
+            variables.extend(token_vars);
+        }
+        let slot_count = variables.len() - slots_before;
+        if slot_count != 0 {
+            token_slot_counts.push((position, slot_count));
+        }
+    }
+
+    debug_assert_eq!(encoded_cursor, encoded_vars.len());
+    debug_assert_eq!(dict_cursor, dictionary_vars.len());
+    (
+        display_parts.join(" "),
+        variables,
+        embedded_tokens,
+        token_slot_counts,
+    )
 }
 
 /// Decode a CLP logtype fragment back to original text, advancing var cursors.
@@ -133,7 +163,8 @@ fn decode_clp_fragment(
     let enc_slice = &encoded_vars[*encoded_cursor..enc_end];
     let dict_slice = &dictionary_vars[*dict_cursor..dict_end];
 
-    let decoded = decode_message::<EightByteEncodedVariable>(logtype_fragment, enc_slice, dict_slice);
+    let decoded =
+        decode_message::<EightByteEncodedVariable>(logtype_fragment, enc_slice, dict_slice);
 
     *encoded_cursor += n_encoded;
     *dict_cursor += n_dict;
@@ -163,17 +194,6 @@ fn count_clp_vars(logtype: &str) -> (usize, usize) {
     }
 
     (n_encoded, n_dict)
-}
-
-/// Advance CLP variable cursors past all placeholders in a logtype token.
-fn advance_clp_cursors(
-    logtype_token: &str,
-    encoded_cursor: &mut usize,
-    dict_cursor: &mut usize,
-) {
-    let (n_encoded, n_dict) = count_clp_vars(logtype_token);
-    *encoded_cursor += n_encoded;
-    *dict_cursor += n_dict;
 }
 
 /// Replace CLP placeholder chars in a Drain3 template token with `<*>`,
@@ -263,6 +283,108 @@ fn expand_clp_placeholders(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::VarType;
+
+    #[test]
+    fn test_pipeline_path_widening_keeps_cursors_in_sync() {
+        let mut pipeline = ClpDrainPipeline::new(Config::default());
+        let first = pipeline.process_line("request path=/foo/1 elapsed=10");
+        assert_eq!(first.display_template, "request path=/foo/<*> elapsed=<*>");
+        assert_eq!(
+            first
+                .variables
+                .iter()
+                .map(|v| v.raw.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "10"]
+        );
+
+        let second = pipeline.process_line("request path=/bar/2 elapsed=20");
+        assert_eq!(second.pattern_id, first.pattern_id);
+        assert_eq!(second.display_template, "request <*> elapsed=<*>");
+        assert_eq!(
+            second
+                .variables
+                .iter()
+                .map(|v| v.raw.as_str())
+                .collect::<Vec<_>>(),
+            ["path=/bar/2", "20"]
+        );
+    }
+
+    #[test]
+    fn test_pipeline_interleaved_wildcards_and_placeholders() {
+        let mut pipeline = ClpDrainPipeline::new(Config::default());
+        // Seed a cluster with wildcards at the beginning, middle and end. Each
+        // fixed token has integer, dictionary and float placeholders.
+        pipeline
+            .drain
+            .train("<*> metrics=\x11,\x12,\x13 <*> more=\x11,\x12,\x13 <*>");
+
+        for (line, expected) in [
+            (
+                "route(\x11,\x12,\x13,\\,/foo/1,0xabc1,1.25) metrics=10,deadbeef,2.50 phase(/v2/22,feedface,3.75) more=30,0xface,4.50 tail(/v3/33,ab12,5.75)",
+                [
+                    "route(\x11,\x12,\x13,\\,/foo/1,0xabc1,1.25)",
+                    "10",
+                    "deadbeef",
+                    "2.50",
+                    "phase(/v2/22,feedface,3.75)",
+                    "30",
+                    "0xface",
+                    "4.50",
+                    "tail(/v3/33,ab12,5.75)",
+                ],
+            ),
+            (
+                "lane(/bar/2,0xdef2,6.25) metrics=20,cafebabe,7.50 stage(/v4/44,deadbeef,8.75) more=40,0xbeef,9.50 end(/v5/55,cd34,10.75)",
+                [
+                    "lane(/bar/2,0xdef2,6.25)",
+                    "20",
+                    "cafebabe",
+                    "7.50",
+                    "stage(/v4/44,deadbeef,8.75)",
+                    "40",
+                    "0xbeef",
+                    "9.50",
+                    "end(/v5/55,cd34,10.75)",
+                ],
+            ),
+            (
+                "start metrics=50,facefeed,11.50 middle more=60,0xabcd,12.50 finish",
+                [
+                    "start", "50", "facefeed", "11.50", "middle", "60", "0xabcd", "12.50", "finish",
+                ],
+            ),
+        ] {
+            let parsed = pipeline.process_line(line);
+            assert_eq!(parsed.pattern_id, 1);
+            assert_eq!(
+                parsed.display_template,
+                "<*> metrics=<*>,<*>,<*> <*> more=<*>,<*>,<*> <*>"
+            );
+            let expected_types = [
+                VarType::String,
+                VarType::Integer,
+                VarType::HexID,
+                VarType::Float,
+                VarType::String,
+                VarType::Integer,
+                VarType::HexID,
+                VarType::Float,
+                VarType::String,
+            ];
+            let expected_vars: Vec<_> = expected
+                .into_iter()
+                .zip(expected_types)
+                .map(|(raw, var_type)| TypedVariable {
+                    raw: raw.into(),
+                    var_type,
+                })
+                .collect();
+            assert_eq!(parsed.variables, expected_vars, "line: {line}");
+        }
+    }
 
     #[test]
     fn test_pipeline_basic() {
@@ -296,10 +418,16 @@ mod tests {
         assert_eq!(r1.pattern_id, r2.pattern_id);
 
         // The UUIDs should be extracted as variables
-        let uuid_vars: Vec<_> = r2.variables.iter()
+        let uuid_vars: Vec<_> = r2
+            .variables
+            .iter()
             .filter(|v| v.raw.contains('-') && v.raw.len() > 30)
             .collect();
-        assert!(uuid_vars.len() >= 2, "Should extract UUIDs as variables, got: {:?}", r2.variables);
+        assert!(
+            uuid_vars.len() >= 2,
+            "Should extract UUIDs as variables, got: {:?}",
+            r2.variables
+        );
     }
 
     #[test]
