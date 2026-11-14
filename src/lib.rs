@@ -135,6 +135,9 @@ pub fn run(args: Args) -> Result<()> {
         };
 
         let parsed = pipeline.process_line(&stripped);
+        if let Some(id) = parsed.evicted_pattern_id {
+            store.evict_pattern(id);
+        }
 
         store.accumulate(
             parsed.pattern_id,
@@ -200,6 +203,9 @@ pub fn process_log_text(input: &str, opts: &FormatOptions) -> AnalysisOutput {
         };
 
         let parsed = pipeline.process_line(&stripped);
+        if let Some(id) = parsed.evicted_pattern_id {
+            store.evict_pattern(id);
+        }
 
         store.accumulate(
             parsed.pattern_id,

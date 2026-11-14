@@ -43,6 +43,8 @@ pub struct TypedVariable {
 /// Result of parsing a log line through Drain3
 pub struct ParsedLog {
     pub pattern_id: PatternID,
+    /// Discard statistics for this ID when synchronizing with the cluster cache.
+    pub evicted_pattern_id: Option<PatternID>,
     pub template: String,
     pub count: u64,
     pub variables: Vec<TypedVariable>,
@@ -199,8 +201,8 @@ impl LogClusterCache {
         values
     }
 
-    fn set(&mut self, key: usize, cluster: LogCluster) {
-        self.cache.put(key, cluster);
+    fn set(&mut self, key: usize, cluster: LogCluster) -> Option<usize> {
+        self.cache.push(key, cluster).map(|(id, _)| id)
     }
 
     fn get(&mut self, key: usize) -> Option<&mut LogCluster> {
@@ -232,6 +234,7 @@ pub struct Drain {
     root_node: Node,
     id_to_cluster: LogClusterCache,
     clusters_counter: usize,
+    evicted_cluster_id: Option<usize>,
 }
 
 impl Drain {
@@ -247,6 +250,7 @@ impl Drain {
             root_node: Node::new(),
             id_to_cluster: LogClusterCache::new(local_config.max_clusters),
             clusters_counter: 0,
+            evicted_cluster_id: None,
         }
     }
 
@@ -254,7 +258,13 @@ impl Drain {
         self.id_to_cluster.values()
     }
 
+    /// Eviction caused by the most recent training call, if not yet consumed.
+    pub fn take_evicted_cluster_id(&mut self) -> Option<usize> {
+        self.evicted_cluster_id.take()
+    }
+
     pub fn train(&mut self, content: &str) -> LogCluster {
+        self.evicted_cluster_id = None;
         let content_tokens = self.get_content_as_tokens(content);
 
         let match_cluster_opt = {
@@ -275,7 +285,7 @@ impl Drain {
                 size: 1,
             };
 
-            self.id_to_cluster.set(cluster_id, match_cluster);
+            self.evicted_cluster_id = self.id_to_cluster.set(cluster_id, match_cluster);
             // let mut root_node = self.root_node.clone();
             // self.add_seq_to_prefix_tree(&mut root_node, cluster_id, &content_tokens);
             self.add_seq_to_prefix_tree_helper(cluster_id, &content_tokens);
@@ -347,6 +357,7 @@ impl Drain {
 
         ParsedLog {
             pattern_id: cluster.id,
+            evicted_pattern_id: self.take_evicted_cluster_id(),
             template: cluster.get_template(),
             count: cluster.size as u64,
             variables,
@@ -583,6 +594,9 @@ impl Drain {
 
         // handle case of empty log string
         if token_count == 0 {
+            first_layer_node
+                .cluster_ids
+                .retain(|&id| self.id_to_cluster.peek(id).is_some());
             first_layer_node.cluster_ids.push(cluster_id);
             return;
         }
@@ -688,6 +702,10 @@ fn get_seq_distance_static(
         panic!("seq1 and seq2 must be of same length");
     }
 
+    if seq1.is_empty() {
+        return (1.0, 0);
+    }
+
     let mut sim_tokens = 0;
     let mut param_count = 0;
 
@@ -736,6 +754,9 @@ fn add_seq_to_prefix_tree_impl(
 
     // handle case of empty log string
     if token_count == 0 {
+        first_layer_node
+            .cluster_ids
+            .retain(|&id| id_to_cluster.peek(id).is_some());
         first_layer_node.cluster_ids.push(cluster_id);
         return;
     }
@@ -814,6 +835,111 @@ fn has_numbers(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_whitespace_records_share_one_cluster() {
+        let mut drain = Drain::new(Config::default());
+        for i in 1..=1_000 {
+            let parsed = drain.extract_template_and_vars(" \t ");
+            assert_eq!(parsed.pattern_id, 1);
+            assert_eq!(parsed.count, i);
+            assert!(parsed.template.is_empty());
+        }
+        assert_eq!(drain.clusters().len(), 1);
+        assert_eq!(drain.root_node.key_to_child_node["0"].cluster_ids.len(), 1);
+        assert_eq!(drain.match_log("").unwrap().id, 1);
+    }
+
+    #[test]
+    fn test_empty_cluster_candidates_drop_evicted_ids() {
+        let mut drain = Drain::new(Config {
+            max_clusters: 1,
+            ..Config::default()
+        });
+        for _ in 0..100 {
+            let cluster = drain.train(" ");
+            assert_eq!(
+                drain.root_node.key_to_child_node["0"].cluster_ids,
+                [cluster.id]
+            );
+            drain.train("occupied");
+        }
+    }
+
+    fn observe_eviction_input(check_bound: bool) -> crate::stats::PatternStore {
+        use crate::extraction::pipeline::ClpDrainPipeline;
+        use crate::stats::PatternStore;
+
+        let mut pipeline = ClpDrainPipeline::new(Config {
+            max_clusters: 3,
+            ..Config::default()
+        });
+        let mut store = PatternStore::new(0);
+        for (i, word) in ["ggg", "hhh", "iii", "jjj", "kkk", "ggg", "ggg"]
+            .into_iter()
+            .enumerate()
+        {
+            let parsed = pipeline.process_line(word);
+            if let Some(id) = parsed.evicted_pattern_id {
+                store.evict_pattern(id);
+            }
+            let minute = match i {
+                0 => -100,
+                1 => 100,
+                _ => 0,
+            };
+            store.accumulate(
+                parsed.pattern_id,
+                &parsed.display_template,
+                &parsed.variables,
+                &parsed.token_slot_counts,
+                &parsed.embedded_tokens,
+                chrono::DateTime::from_timestamp(minute * 60, 0),
+                word,
+                i as u64 + 1,
+            );
+            if check_bound {
+                assert!(store.patterns.len() <= 3, "line {}", i + 1);
+            }
+        }
+        store
+    }
+
+    #[test]
+    fn test_evicted_pattern_store_bound_and_global_range() {
+        let store = observe_eviction_input(true);
+        assert_eq!(store.global_line_count, 7);
+        assert_eq!(store.time_range_minutes(), Some((-100, 100)));
+        assert_eq!(store.global_first_ts.unwrap().timestamp(), -6000);
+        assert_eq!(store.global_last_ts.unwrap().timestamp(), 6000);
+        assert_eq!(
+            store
+                .patterns
+                .keys()
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            [4, 5, 6].into()
+        );
+        assert_eq!(store.patterns[&6].count, 2);
+        assert_eq!(store.patterns.values().map(|p| p.count).sum::<u64>(), 4);
+    }
+
+    #[test]
+    fn test_evicted_pattern_count_in_json() {
+        let store = observe_eviction_input(false);
+        let opts = crate::types::FormatOptions {
+            top: 0,
+            context: 0,
+            no_color: true,
+            no_banner: true,
+            output_mode: crate::types::OutputMode::Json,
+        };
+        let json = crate::format::format_output(&store, &opts, &HashMap::new());
+        let output: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(output["summary"]["pattern_count"], 3);
+        assert_eq!(output["summary"]["total_lines"], 7);
+        assert!(output["patterns"].as_array().unwrap().is_empty());
+    }
 
     #[test]
     fn test_drain3() {

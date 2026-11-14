@@ -6,6 +6,8 @@ use crate::types::PatternID;
 /// Result of processing a log line through the CLP → Drain3 pipeline.
 pub struct PipelineParsedLog {
     pub pattern_id: PatternID,
+    /// Discard statistics for this ID before accumulating the current record.
+    pub evicted_pattern_id: Option<PatternID>,
     pub display_template: String,
     pub variables: Vec<TypedVariable>,
     /// Actual variable counts for tokens that have slots, in token order.
@@ -51,6 +53,7 @@ impl ClpDrainPipeline {
 
         PipelineParsedLog {
             pattern_id: parsed.pattern_id,
+            evicted_pattern_id: parsed.evicted_pattern_id,
             display_template,
             variables,
             token_slot_counts,
