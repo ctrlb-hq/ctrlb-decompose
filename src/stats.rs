@@ -325,12 +325,13 @@ pub struct PatternStats {
     pub example_lines: BoundedVec<String>,
     // One bounded whole-token summary per fixed token with embedded variables.
     // On widening it replaces that token's subslots, without replaying lines.
-    embedded_history: Vec<Option<VarSlotStats>>,
+    embedded_history: HashMap<usize, VarSlotStats>,
+    // Sparse counts from extraction, independent of literal display markers.
+    token_slot_counts: Vec<(usize, usize)>,
 }
 
 impl PatternStats {
     pub fn new(pattern_id: PatternID, template: String, context_lines: usize) -> Self {
-        let token_count = template.split_whitespace().count();
         PatternStats {
             pattern_id,
             template,
@@ -342,7 +343,8 @@ impl PatternStats {
             variables: Vec::new(),
             time_buckets: HashMap::new(),
             example_lines: BoundedVec::new(context_lines),
-            embedded_history: (0..token_count).map(|_| None).collect(),
+            embedded_history: HashMap::new(),
+            token_slot_counts: Vec::new(),
         }
     }
 
@@ -351,21 +353,24 @@ impl PatternStats {
             return;
         }
         let mut old_slots = std::mem::take(&mut self.variables).into_iter();
+        let mut counts = self.token_slot_counts.iter().peekable();
         for (position, (old, new)) in self
             .template
             .split_whitespace()
             .zip(template.split_whitespace())
             .enumerate()
         {
-            let subslots = old.matches("<*>").count();
+            let subslots = if counts.peek().is_some_and(|(token, _)| *token == position) {
+                counts.next().map_or(0, |(_, count)| *count)
+            } else {
+                0
+            };
             if old != new {
                 debug_assert_eq!(new, "<*>", "Drain only widens whole tokens");
                 // Discard all subslots belonging to this token; never let their
                 // observations leak into the new slot or its following slots.
-                for _ in 0..subslots {
-                    old_slots.next().expect("existing token subslot");
-                }
-                let slot = self.embedded_history[position].take().unwrap_or_else(|| {
+                for _ in old_slots.by_ref().take(subslots) {}
+                let slot = self.embedded_history.remove(&position).unwrap_or_else(|| {
                     debug_assert_eq!(subslots, 0);
                     VarSlotStats::backfill(self.variables.len(), old, self.count)
                 });
@@ -408,6 +413,7 @@ impl PatternStore {
         pattern_id: PatternID,
         template: &str,
         variables: &[TypedVariable],
+        token_slot_counts: &[(usize, usize)],
         embedded_tokens: &[(usize, String)],
         timestamp: Option<DateTime<Utc>>,
         raw_line: &str,
@@ -436,6 +442,9 @@ impl PatternStore {
             .or_insert_with(|| PatternStats::new(pattern_id, template.to_string(), ctx));
 
         stats.reconcile_template(template);
+        if stats.token_slot_counts != token_slot_counts {
+            stats.token_slot_counts = token_slot_counts.to_vec();
+        }
 
         stats.count += 1;
         if stats.first_seen_line == 0 {
@@ -472,8 +481,10 @@ impl PatternStore {
         }
 
         for (position, raw) in embedded_tokens {
-            let history =
-                stats.embedded_history[*position].get_or_insert_with(|| VarSlotStats::new(0));
+            let history = stats
+                .embedded_history
+                .entry(*position)
+                .or_insert_with(|| VarSlotStats::new(0));
             history.update_with_cap(
                 &TypedVariable {
                     var_type: classify_variable(raw),
@@ -549,11 +560,75 @@ mod tests {
             parsed.pattern_id,
             &parsed.display_template,
             &parsed.variables,
+            &parsed.token_slot_counts,
             &parsed.embedded_tokens,
             None,
             line,
             store.global_line_count + 1,
         );
+    }
+
+    #[test]
+    fn test_literal_wildcards_do_not_shift_slots_on_widening() {
+        for (first, second) in [
+            (
+                "INFO literal=<*><*> count=10 end",
+                "INFO other count=20 end",
+            ),
+            (
+                "INFO literal=<*><*> accepted count=10 end",
+                "INFO literal=<*><*> rejected count=20 end",
+            ),
+            (
+                "INFO route=<*>/foo/1/2 count=10 end",
+                "INFO route=<*>/bar/3/4 count=20 end",
+            ),
+        ] {
+            let mut pipe = ClpDrainPipeline::new(Config::default());
+            let mut store = PatternStore::new(0);
+            observe(&mut pipe, &mut store, first);
+            observe(&mut pipe, &mut store, second);
+            store.finalize();
+
+            assert_eq!(store.patterns.len(), 1);
+            let stats = &store.patterns[&1];
+            assert_eq!(stats.count, 2);
+            assert_eq!(stats.variables.len(), 2);
+            for (index, slot) in stats.variables.iter().enumerate() {
+                assert_eq!(slot.slot_index, index);
+                assert_eq!(slot.categorical.total_count, 2);
+            }
+            let widened = &stats.variables[0];
+            let position = if first.contains("accepted") { 2 } else { 1 };
+            for line in [first, second] {
+                let token = line.split_whitespace().nth(position).unwrap();
+                assert_eq!(widened.categorical.exact_counts[token], 1);
+            }
+            let count = stats.variables[1].numeric.as_ref().unwrap();
+            assert_eq!(count.count, 2);
+            assert_eq!((count.min, count.max, count.sum), (10.0, 20.0, 30.0));
+        }
+    }
+
+    #[test]
+    fn test_fixed_tokens_do_not_allocate_embedded_history() {
+        let mut pipe = ClpDrainPipeline::new(Config::default());
+        let mut store = PatternStore::new(0);
+        for words in 100..600 {
+            observe(
+                &mut pipe,
+                &mut store,
+                &format!("{}end", "word ".repeat(words)),
+            );
+        }
+        assert_eq!(store.patterns.len(), 500);
+        for stats in store.patterns.values() {
+            assert!(stats.variables.is_empty());
+            assert_eq!(stats.embedded_history.len(), 0);
+            assert_eq!(stats.embedded_history.capacity(), 0);
+            assert!(stats.token_slot_counts.is_empty());
+            assert_eq!(stats.token_slot_counts.capacity(), 0);
+        }
     }
 
     #[test]
@@ -634,7 +709,7 @@ mod tests {
                 ),
             );
         }
-        let history = store.patterns[&1].embedded_history[2].as_ref().unwrap();
+        let history = &store.patterns[&1].embedded_history[&2];
         assert_eq!(history.categorical.exact_counts.len(), EMBEDDED_HISTORY_CAP);
         assert_eq!(history.categorical.total_count, n);
         assert!(history.categorical.capped);
@@ -648,7 +723,7 @@ mod tests {
         let stats = &store.patterns[&1];
         assert_eq!(stats.template, "INFO request <*> elapsed=<*>");
         assert_eq!(stats.variables.len(), 2);
-        assert!(stats.embedded_history[2].is_none());
+        assert!(!stats.embedded_history.contains_key(&2));
         let path = &stats.variables[0];
         assert!(path.numeric.is_none());
         assert_eq!(path.categorical.total_count, n + 1);

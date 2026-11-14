@@ -8,6 +8,9 @@ pub struct PipelineParsedLog {
     pub pattern_id: PatternID,
     pub display_template: String,
     pub variables: Vec<TypedVariable>,
+    /// Actual variable counts for tokens that have slots, in token order.
+    /// Literal `<*>` text in a fixed token does not contribute a slot.
+    pub token_slot_counts: Vec<(usize, usize)>,
     /// Decoded fixed tokens with embedded CLP variables, indexed by token position.
     /// These feed bounded summaries in case Drain later widens the whole token.
     pub embedded_tokens: Vec<(usize, String)>,
@@ -43,13 +46,14 @@ impl ClpDrainPipeline {
         // Step 2: Feed CLP logtype to Drain3 for structural clustering
         let parsed = self.drain.extract_template_and_vars(&logtype);
 
-        let (display_template, variables, embedded_tokens) =
+        let (display_template, variables, embedded_tokens, token_slot_counts) =
             extract_template_variables(&parsed.template, &logtype, &encoded_vars, &dictionary_vars);
 
         PipelineParsedLog {
             pattern_id: parsed.pattern_id,
             display_template,
             variables,
+            token_slot_counts,
             embedded_tokens,
             count: parsed.count,
         }
@@ -63,7 +67,12 @@ fn extract_template_variables(
     logtype: &str,
     encoded_vars: &[EightByteEncodedVariable],
     dictionary_vars: &[String],
-) -> (String, Vec<TypedVariable>, Vec<(usize, String)>) {
+) -> (
+    String,
+    Vec<TypedVariable>,
+    Vec<(usize, String)>,
+    Vec<(usize, usize)>,
+) {
     let template_tokens: Vec<&str> = template.split_whitespace().collect();
     let logtype_tokens: Vec<&str> = logtype.split_whitespace().collect();
     debug_assert_eq!(template_tokens.len(), logtype_tokens.len());
@@ -71,6 +80,7 @@ fn extract_template_variables(
     let mut display_parts = Vec::new();
     let mut variables = Vec::new();
     let mut embedded_tokens = Vec::new();
+    let mut token_slot_counts = Vec::new();
 
     // Both wildcard decoding and fixed-token expansion consume the same CLP
     // streams in logtype order. A wildcard must advance both shared cursors.
@@ -80,6 +90,7 @@ fn extract_template_variables(
     for (position, (template_token, logtype_token)) in
         template_tokens.iter().zip(&logtype_tokens).enumerate()
     {
+        let slots_before = variables.len();
         if *template_token == "<*>" {
             let raw = decode_clp_fragment(
                 logtype_token,
@@ -118,11 +129,20 @@ fn extract_template_variables(
             display_parts.push(display_token);
             variables.extend(token_vars);
         }
+        let slot_count = variables.len() - slots_before;
+        if slot_count != 0 {
+            token_slot_counts.push((position, slot_count));
+        }
     }
 
     debug_assert_eq!(encoded_cursor, encoded_vars.len());
     debug_assert_eq!(dict_cursor, dictionary_vars.len());
-    (display_parts.join(" "), variables, embedded_tokens)
+    (
+        display_parts.join(" "),
+        variables,
+        embedded_tokens,
+        token_slot_counts,
+    )
 }
 
 /// Decode a CLP logtype fragment back to original text, advancing var cursors.
